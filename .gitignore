@@ -1,0 +1,26 @@
+# Local environment and editor state
+.env
+.env.*
+.vscode/
+.idea/
+.claude/
+
+# Dependencies and build output
+node_modules/
+dist/
+build/
+coverage/
+
+# Python caches / environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+TS_SupportScripts/
+TS_Phenology/
+TS_Smoothing/
