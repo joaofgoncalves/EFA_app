@@ -541,16 +541,64 @@ function computeStatistic(yearCol, statName, doyMaxImage) {
 // SECTION 6: COLLECTION LOADING PIPELINE & EXPORT
 // ============================================================================
 
+// Convert product cadence labels to days for year-edge interpolation buffers.
+function getTemporalStepDays(product) {
+  if (product.temporal === 'Daily') return 1;
+
+  var match = product.temporal.match(/^(\d+)-day$/);
+  if (match) return parseInt(match[1], 10);
+
+  return 1;
+}
+
+// Fill masked pixels in each timestamp from a centered, image-count temporal window.
+// The focal image is included in the reducer, but original valid pixels are preserved.
+function gapFillTemporalReducer(imgCol, windowSize, method) {
+  var halfWindow = Math.floor(windowSize / 2);
+  var sorted = ee.ImageCollection(imgCol).sort('system:time_start');
+  var count = sorted.size();
+  var imgList = sorted.toList(count);
+  var indexes = ee.List(ee.Algorithms.If(
+    count.gt(0),
+    ee.List.sequence(0, count.subtract(1)),
+    ee.List([])
+  ));
+
+  var filled = indexes.map(function(index) {
+    index = ee.Number(index);
+    var start = index.subtract(halfWindow).max(0);
+    var end = index.add(halfWindow).add(1).min(count);
+    var localCol = ee.ImageCollection.fromImages(imgList.slice(start, end));
+    var filler = (method === 'Mean') ? localCol.mean() : localCol.median();
+    var img = ee.Image(imgList.get(index));
+
+    return img.unmask(filler)
+      .copyProperties(img, img.propertyNames());
+  });
+
+  return ee.ImageCollection.fromImages(filled)
+    .sort('system:time_start');
+}
+
 // Load, filter, mask, and process a MODIS collection for one variable and year
-function loadAndProcessCollection(productKey, varName, year, aoi) {
+function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions) {
   var product = PRODUCTS[productKey];
   var varConfig = product.variables[varName];
+  gapFillOptions = gapFillOptions || {enabled: false};
 
-  var startDate = year + '-01-01';
-  var endDate = (year + 1) + '-01-01';
+  var startDate = ee.Date.fromYMD(year, 1, 1);
+  var endDate = startDate.advance(1, 'year');
+  var loadStartDate = startDate;
+  var loadEndDate = endDate;
+
+  if (gapFillOptions.enabled) {
+    var bufferDays = getTemporalStepDays(product) * Math.floor(gapFillOptions.window / 2);
+    loadStartDate = startDate.advance(-bufferDays, 'day');
+    loadEndDate = endDate.advance(bufferDays, 'day');
+  }
 
   var col = ee.ImageCollection(product.geeId)
-    .filterDate(startDate, endDate)
+    .filterDate(loadStartDate, loadEndDate)
     .filterBounds(aoi);
 
   // Apply product-level QA mask (cloud/shadow/cirrus) if toggle is enabled
@@ -574,7 +622,14 @@ function loadAndProcessCollection(productKey, varName, year, aoi) {
     });
   }
 
-  return col.sort('system:time_start');
+  col = col.sort('system:time_start');
+
+  if (gapFillOptions.enabled) {
+    col = gapFillTemporalReducer(col, gapFillOptions.window, gapFillOptions.method);
+  }
+
+  return col.filterDate(startDate, endDate)
+    .sort('system:time_start');
 }
 
 // Create a single export task to Google Drive
@@ -647,6 +702,7 @@ var variableCheckboxes = {};
 var statisticCheckboxes = {};
 var currentAssetAOI = null;
 var applyQAMask = true;  // Enable science-grade QA / cloud masking by default
+var applyGapFill = false; // Optional temporal interpolation of masked pixels
 
 // --- Styles ---
 var S = {
@@ -798,6 +854,37 @@ var qaMaskInfo = ui.Label(
   {fontSize: '10px', color: '#7f8c8d', margin: '1px 0 4px 12px', whiteSpace: 'pre-wrap'}
 );
 
+// ---- Temporal Gap-Filling Toggle ----
+var gapFillCheckbox = ui.Checkbox({
+  label: 'Apply Temporal Gap Fill',
+  value: false,
+  style: {fontSize: '12px', margin: '6px 0 0 0'}
+});
+var gapFillMethodSelect = ui.Select({
+  items: ['Median', 'Mean'],
+  value: 'Median',
+  style: {stretch: 'horizontal', fontSize: '12px'}
+});
+var gapFillWindowInput = ui.Textbox({
+  value: '5',
+  placeholder: 'Odd integer >= 3',
+  style: {stretch: 'horizontal', fontSize: '12px'}
+});
+var gapFillControls = ui.Panel({
+  widgets: [
+    makeRow('Method:', gapFillMethodSelect),
+    makeRow('Window:', gapFillWindowInput)
+  ],
+  style: {shown: false, margin: '2px 0 0 12px'}
+});
+var gapFillInfo = ui.Label(
+  'Fills only masked pixels using a centered image-count window. ' +
+  'For example, window 5 uses two observations before and two after the focal date; ' +
+  'the real time span depends on product frequency.',
+  {fontSize: '10px', color: '#7f8c8d', margin: '1px 0 4px 12px',
+   whiteSpace: 'pre-wrap', shown: false}
+);
+
 // ---- Calculate Button ----
 var calcButton = ui.Button({
   label: 'CALCULATE & EXPORT',
@@ -853,6 +940,7 @@ var mainPanel = ui.Panel({
     ui.Panel({style: S.sep}),
     exportHeader, exportPanel,
     qaMaskCheckbox, qaMaskInfo,
+    gapFillCheckbox, gapFillControls, gapFillInfo,
     calcButton, statusLabel,
     infoToggle, infoContent
   ],
@@ -919,6 +1007,13 @@ toggleAoiBtn.onClick(function() {
 // --- QA Mask Toggle ---
 qaMaskCheckbox.onChange(function(checked) {
   applyQAMask = checked;
+});
+
+// --- Temporal Gap Fill Toggle ---
+gapFillCheckbox.onChange(function(checked) {
+  applyGapFill = checked;
+  gapFillControls.style().set('shown', checked);
+  gapFillInfo.style().set('shown', checked);
 });
 
 // --- AOI Method Toggle ---
@@ -1029,6 +1124,36 @@ function getSelectedStatistics() {
   return sel;
 }
 
+function getGapFillOptions() {
+  applyGapFill = gapFillCheckbox.getValue();
+
+  if (!applyGapFill) {
+    return {enabled: false, method: 'Median', window: 5, suffix: ''};
+  }
+
+  var method = gapFillMethodSelect.getValue() || 'Median';
+  if (method !== 'Median' && method !== 'Mean') {
+    return {error: 'ERROR: Select a valid temporal gap-fill method.'};
+  }
+
+  var windowText = gapFillWindowInput.getValue().trim();
+  if (!/^\d+$/.test(windowText)) {
+    return {error: 'ERROR: Gap-fill window must be an odd integer >= 3.'};
+  }
+
+  var windowSize = parseInt(windowText, 10);
+  if (windowSize < 3 || windowSize % 2 === 0) {
+    return {error: 'ERROR: Gap-fill window must be an odd integer >= 3.'};
+  }
+
+  return {
+    enabled: true,
+    method: method,
+    window: windowSize,
+    suffix: '_GF' + method + 'W' + windowSize
+  };
+}
+
 // --- Calculate Button Handler ---
 calcButton.onClick(function() {
   statusLabel.style().set('color', '#333');
@@ -1074,6 +1199,14 @@ calcButton.onClick(function() {
     return;
   }
 
+  // Validate temporal gap-fill settings
+  var gapFillOptions = getGapFillOptions();
+  if (gapFillOptions.error) {
+    statusLabel.style().set('color', 'red');
+    statusLabel.setValue(gapFillOptions.error);
+    return;
+  }
+
   // Parse export settings
   var crs = crsInput.getValue().trim() || 'EPSG:4326';
   var scale = parseInt(scaleInput.getValue(), 10) || PRODUCTS[productKey].resolution;
@@ -1084,6 +1217,10 @@ calcButton.onClick(function() {
   var taskCount = selectedVars.length * selectedStats.length;
   statusLabel.style().set('color', '#333');
   var prepMsg = 'Preparing ' + taskCount + ' export task(s)...';
+  if (gapFillOptions.enabled) {
+    prepMsg += '\nTemporal gap fill: ' + gapFillOptions.method +
+      ', window ' + gapFillOptions.window;
+  }
   if (taskCount > 50) {
     prepMsg += '\n(NOTE: High task count - consider reducing selections)';
   }
@@ -1105,7 +1242,7 @@ calcButton.onClick(function() {
   // Process each variable x statistic combination
   for (var v = 0; v < selectedVars.length; v++) {
     var varName = selectedVars[v];
-    var imgCol = loadAndProcessCollection(productKey, varName, year, aoi);
+    var imgCol = loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions);
 
     // Pre-compute DOY_Max if needed (cached per variable)
     var doyMaxImage = null;
@@ -1118,7 +1255,8 @@ calcButton.onClick(function() {
       var result = computeStatistic(imgCol, statName, doyMaxImage);
 
       if (result) {
-        var desc = productShort + '_' + varName + '_' + statName + '_' + year;
+        var desc = productShort + '_' + varName + '_' + statName + '_' + year +
+          gapFillOptions.suffix;
         createExportTask(result, desc, aoi, crs, scale, folder, maxPx);
         exportCount++;
 
@@ -1150,7 +1288,8 @@ calcButton.onClick(function() {
   statusLabel.setValue(
     'Done! Created ' + exportCount + ' export task(s).\n' +
     'Go to the Tasks tab (top right) to start them.\n' +
-    'Each task: ' + productShort + '_{Variable}_{Statistic}_' + year
+    'Each task: ' + productShort + '_{Variable}_{Statistic}_' + year +
+    gapFillOptions.suffix
   );
 });
 
