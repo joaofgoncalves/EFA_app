@@ -38,24 +38,94 @@ function getQABits(image, start, end, newName) {
     .rightShift(start);
 }
 
-// MOD09A1 cloud mask via StateQA bits 8-13
+// --------------------------------------------------------------------------
+// Science-grade QA mask functions (one per product or per band where needed)
+// --------------------------------------------------------------------------
+
+// MOD09A1: StateQA bitmask - cloud state (bits 0-1), shadow (2), cirrus (8-9), internal cloud (10)
+// Refs: LP DAAC MOD09A1 C6.1 User Guide Table 2
 function maskQA_MOD09A1(image) {
-  var QA = image.select('StateQA');
-  var internalQuality = getQABits(QA, 8, 13, 'internal_quality_flag');
-  return image.updateMask(internalQuality.eq(0));
+  var qa = image.select('StateQA');
+  var cloudState  = getQABits(qa,  0,  1, 'cloud_state');   // 00 = clear
+  var cloudShadow = getQABits(qa,  2,  2, 'cloud_shadow');  // 0  = no shadow
+  var cirrus      = getQABits(qa,  8,  9, 'cirrus');        // 00 = none
+  var intCloud    = getQABits(qa, 10, 10, 'int_cloud');     // 0  = clear
+  return image.updateMask(
+    cloudState.eq(0).and(cloudShadow.eq(0)).and(cirrus.eq(0)).and(intCloud.eq(0))
+  );
 }
 
-// MOD09Q1 cloud mask via State bits 0-1 (00 = clear)
+// MOD09Q1: State bitmask - same bit layout as MOD09A1 StateQA
 function maskQA_MOD09Q1(image) {
-  var state = image.select('State');
-  var cloudState = getQABits(state, 0, 1, 'cloud_state');
-  return image.updateMask(cloudState.eq(0));
+  var qa = image.select('State');
+  var cloudState  = getQABits(qa,  0,  1, 'cloud_state');
+  var cloudShadow = getQABits(qa,  2,  2, 'cloud_shadow');
+  var cirrus      = getQABits(qa,  8,  9, 'cirrus');
+  var intCloud    = getQABits(qa, 10, 10, 'int_cloud');
+  return image.updateMask(
+    cloudState.eq(0).and(cloudShadow.eq(0)).and(cirrus.eq(0)).and(intCloud.eq(0))
+  );
 }
 
-// MOD13Q1 mask via SummaryQA (0=good, 1=marginal, 2=snow, 3=cloudy)
+// MOD13Q1: SummaryQA - keep good (0) and marginal (1); exclude snow/ice (2) and cloud (3)
 function maskQA_MOD13Q1(image) {
   var qa = image.select('SummaryQA');
   return image.updateMask(qa.lte(1));
+}
+
+// MOD11A1 / MOD11A2 Day LST: QC_Day bits 0-1 (MODLAND QA): 00=good, 01=other quality
+// Keep both good and other-quality (lte 1); bit values 10/11 mean LST not produced.
+function maskQA_MOD11_Day(image) {
+  var qc = image.select('QC_Day');
+  var qa = getQABits(qc, 0, 1, 'qa');
+  return image.updateMask(qa.lte(1));
+}
+
+// MOD11A1 / MOD11A2 Night LST: same logic using QC_Night band
+function maskQA_MOD11_Night(image) {
+  var qc = image.select('QC_Night');
+  var qa = getQABits(qc, 0, 1, 'qa');
+  return image.updateMask(qa.lte(1));
+}
+
+// MOD17A2H GPP/PsnNet: Psn_QC bit 0 (MODLAND QA: 0=good), bit 3 (cloud: 0=none),
+// bit 4 (significant cloud/ice contamination: 0=none)
+function maskQA_MOD17A2H(image) {
+  var qc       = image.select('Psn_QC');
+  var qa       = getQABits(qc, 0, 0, 'qa');
+  var cloud    = getQABits(qc, 3, 3, 'cloud');
+  var cloudIce = getQABits(qc, 4, 4, 'cloud_ice');
+  return image.updateMask(qa.eq(0).and(cloud.eq(0)).and(cloudIce.eq(0)));
+}
+
+// MCD43A1 BRDF/Albedo: Mandatory quality for Band1 (Red) and Band2 (NIR) <= 1
+// 0=full BRDF inversion (best), 1=magnitude inversion (acceptable), 255=fill
+function maskQA_MCD43A1(image) {
+  var qa1 = image.select('BRDF_Albedo_Band_Mandatory_Quality_Band1');
+  var qa2 = image.select('BRDF_Albedo_Band_Mandatory_Quality_Band2');
+  return image.updateMask(qa1.lte(1).and(qa2.lte(1)));
+}
+
+// MOD16A2 ET: ET_QC bits 0-1 (MODLAND QA: 0=good, 1=other quality) and bit 3 (cloud: 0=none)
+function maskQA_MOD16A2(image) {
+  var qc    = image.select('ET_QC');
+  var qa    = getQABits(qc, 0, 1, 'qa');
+  var cloud = getQABits(qc, 3, 3, 'cloud');
+  return image.updateMask(qa.lte(1).and(cloud.eq(0)));
+}
+
+// MCD15A3H LAI/FPAR: FparLai_QC bits 0-1 (MODLAND QA <= 1) and FparExtra_QC cloud flags
+// FparExtra_QC: bit 1=cloud detected, bit 2=cloud shadow, bit 3=significant cloud/ice
+function maskQA_MCD15A3H(image) {
+  var qc   = image.select('FparLai_QC');
+  var qa   = getQABits(qc, 0, 1, 'qa');
+  var extra       = image.select('FparExtra_QC');
+  var cloud       = getQABits(extra, 1, 1, 'cloud');
+  var cloudShadow = getQABits(extra, 2, 2, 'cloud_shadow');
+  var cloudIce    = getQABits(extra, 3, 3, 'cloud_ice');
+  return image.updateMask(
+    qa.lte(1).and(cloud.eq(0)).and(cloudShadow.eq(0)).and(cloudIce.eq(0))
+  );
 }
 
 // Add DOY band to each image in a collection
@@ -283,10 +353,10 @@ var PRODUCTS = {
     geeId: 'MODIS/061/MOD11A1',
     resolution: 1000,
     temporal: 'Daily',
-    qaMask: null,
+    qaMask: null,   // per-variable masks below (Day vs Night use different QC bands)
     variables: {
-      'LST_Day':   {band: 'LST_Day_1km',   scale: 0.02},
-      'LST_Night': {band: 'LST_Night_1km',  scale: 0.02}
+      'LST_Day':   {band: 'LST_Day_1km',   scale: 0.02, qaMask: maskQA_MOD11_Day},
+      'LST_Night': {band: 'LST_Night_1km',  scale: 0.02, qaMask: maskQA_MOD11_Night}
     }
   },
 
@@ -294,10 +364,10 @@ var PRODUCTS = {
     geeId: 'MODIS/061/MOD11A2',
     resolution: 1000,
     temporal: '8-day',
-    qaMask: null,
+    qaMask: null,   // per-variable masks below
     variables: {
-      'LST_Day':   {band: 'LST_Day_1km',   scale: 0.02},
-      'LST_Night': {band: 'LST_Night_1km',  scale: 0.02}
+      'LST_Day':   {band: 'LST_Day_1km',   scale: 0.02, qaMask: maskQA_MOD11_Day},
+      'LST_Night': {band: 'LST_Night_1km',  scale: 0.02, qaMask: maskQA_MOD11_Night}
     }
   },
 
@@ -316,7 +386,7 @@ var PRODUCTS = {
     geeId: 'MODIS/061/MOD17A2H',
     resolution: 500,
     temporal: '8-day',
-    qaMask: null,
+    qaMask: maskQA_MOD17A2H,
     variables: {
       'GPP':    {band: 'Gpp',    scale: 0.0001},
       'PsnNet': {band: 'PsnNet', scale: 0.0001}
@@ -327,7 +397,7 @@ var PRODUCTS = {
     geeId: 'MODIS/061/MCD43A1',
     resolution: 500,
     temporal: 'Daily',
-    qaMask: null,
+    qaMask: maskQA_MCD43A1,
     variables: {
       'WSA_vis':       {compute: computeAllAlbedo_MCD43A1, band: 'wsa_vis'},
       'WSA_nir':       {compute: computeAllAlbedo_MCD43A1, band: 'wsa_nir'},
@@ -343,7 +413,7 @@ var PRODUCTS = {
     geeId: 'MODIS/061/MOD16A2',
     resolution: 500,
     temporal: '8-day',
-    qaMask: null,
+    qaMask: maskQA_MOD16A2,
     variables: {
       'ET': {band: 'ET', scale: 0.1}
     }
@@ -353,7 +423,7 @@ var PRODUCTS = {
     geeId: 'MODIS/061/MCD15A3H',
     resolution: 500,
     temporal: '4-day',
-    qaMask: null,
+    qaMask: maskQA_MCD15A3H,
     variables: {
       'LAI':  {band: 'Lai',  scale: 0.1},
       'FPAR': {band: 'Fpar', scale: 0.01}
@@ -483,9 +553,13 @@ function loadAndProcessCollection(productKey, varName, year, aoi) {
     .filterDate(startDate, endDate)
     .filterBounds(aoi);
 
-  // Apply QA mask if defined
-  if (product.qaMask) {
+  // Apply product-level QA mask (cloud/shadow/cirrus) if toggle is enabled
+  if (product.qaMask && applyQAMask) {
     col = col.map(product.qaMask);
+  }
+  // Apply variable-level QA mask (e.g. MOD11 Day vs Night use separate QC bands)
+  if (varConfig.qaMask && applyQAMask) {
+    col = col.map(varConfig.qaMask);
   }
 
   // Route: computed variable vs direct band selection + scale
@@ -572,6 +646,7 @@ function getDefaultVisParams(varName, statName) {
 var variableCheckboxes = {};
 var statisticCheckboxes = {};
 var currentAssetAOI = null;
+var applyQAMask = true;  // Enable science-grade QA / cloud masking by default
 
 // --- Styles ---
 var S = {
@@ -711,6 +786,18 @@ var exportPanel = ui.Panel([
   makeRow('Max pixels:', maxPixInput)
 ]);
 
+// ---- QA / Cloud Masking Toggle ----
+var qaMaskCheckbox = ui.Checkbox({
+  label: 'Apply QA / Cloud Mask',
+  value: true,
+  style: {fontSize: '12px', margin: '6px 0 0 0'}
+});
+var qaMaskInfo = ui.Label(
+  'Removes clouds, cloud shadows, cirrus, and low-quality observations ' +
+  'using each product\'s QA/QC band(s). Recommended for science-grade outputs.',
+  {fontSize: '10px', color: '#7f8c8d', margin: '1px 0 4px 12px', whiteSpace: 'pre-wrap'}
+);
+
 // ---- Calculate Button ----
 var calcButton = ui.Button({
   label: 'CALCULATE & EXPORT',
@@ -765,6 +852,7 @@ var mainPanel = ui.Panel({
     statsHeader, statsPanel, statsButtons,
     ui.Panel({style: S.sep}),
     exportHeader, exportPanel,
+    qaMaskCheckbox, qaMaskInfo,
     calcButton, statusLabel,
     infoToggle, infoContent
   ],
@@ -826,6 +914,11 @@ toggleAoiBtn.onClick(function() {
   aoiVisible = !aoiVisible;
   aoiLayer.setShown(aoiVisible);
   toggleAoiBtn.setLabel(aoiVisible ? 'Hide AOI' : 'Show AOI');
+});
+
+// --- QA Mask Toggle ---
+qaMaskCheckbox.onChange(function(checked) {
+  applyQAMask = checked;
 });
 
 // --- AOI Method Toggle ---
@@ -899,8 +992,18 @@ productSelect.onChange(function(productKey) {
 
   scaleInput.setValue(String(product.resolution));
 
+  // Check if any QA masking is available (product-level or variable-level)
+  var hasQA = !!product.qaMask;
+  if (!hasQA) {
+    var vKeys = Object.keys(product.variables);
+    for (var q = 0; q < vKeys.length; q++) {
+      if (product.variables[vKeys[q]].qaMask) { hasQA = true; break; }
+    }
+  }
+
   var infoText = product.resolution + 'm | ' + product.temporal +
-    ' | ' + varNames.length + ' variable(s)';
+    ' | ' + varNames.length + ' variable(s)' +
+    ' | QA mask: ' + (hasQA ? 'available' : 'n/a');
   if (product.temporal === 'Daily') {
     infoText += '\n  Note: Daily product - computation may be slower.';
   }
