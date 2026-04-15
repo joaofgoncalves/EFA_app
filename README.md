@@ -9,9 +9,9 @@ The app is designed for two main use cases:
 
 There is no build system. Paste or open `EFA_Calculator_App.js` in the Earth Engine Code Editor, click **Run**, configure the side panel, then start the generated export tasks from the Earth Engine **Tasks** tab.
 
-## What The App Calculates
+## What the app calculates
 
-EFAs summarize the annual behavior of a per-pixel time series. The app first loads a satellite product, masks poor observations when requested, converts the selected variable into a single-band image collection, optionally fills temporal gaps, and then aggregates each year into annual rasters.
+EFAs summarize the annual behavior of a per-pixel time series. The app first loads a satellite product, masks cloudy observations when requested, converts the selected variable into a single-band image collection, optionally fills temporal gaps, and then aggregates each year into annual rasters.
 
 The selected annual statistics can be interpreted as broad EFA dimensions:
 
@@ -21,9 +21,9 @@ The selected annual statistics can be interpreted as broad EFA dimensions:
 | Seasonality / variability | `StdDev`, `IQR`, `MAD`, `CV`, `Amplitude` | Strength and spread of intra-annual variation. |
 | Phenology | `DOY_Max`, `DOY_Min`, `Springness`, `Winterness`, `GSL` | Timing of annual maximum/minimum and length or timing proxies for seasonal activity. |
 
-Not every statistic is equally meaningful for every variable. For example, `CumSum` is useful for variables such as GPP or ET, but a cumulative LST value is usually a numerical summary rather than a physical annual energy quantity. Choose variable-statistic pairs that match the ecological question.
+Not every statistic is equally meaningful for every variable. For example, the cumulative sum (`CumSum`) is useful for variables such as GPP or ET, but a cumulative LST value is usually a numerical summary rather than a physical annual energy quantity. Choose variable-statistic pairs that match the ecological question.
 
-## Quick Start Workflow
+## Quick start workflow
 
 1. Open `EFA_Calculator_App.js` in the Google Earth Engine Code Editor.
 2. Click **Run**.
@@ -32,7 +32,7 @@ Not every statistic is equally meaningful for every variable. For example, `CumS
 5. Select one or more years.
 6. Select one or more variables.
 7. Select one or more annual statistics.
-8. Set export options: CRS, scale, Drive folder, max pixels, and encoding.
+8. Set export options: CRS, scale (i.e., spatial resolution), Google Drive folder, maximum number of pixels, and raster bit depth/encoding.
 9. Leave the QA/cloud mask enabled unless you have a specific reason to inspect unmasked MODIS values.
 10. Optionally enable temporal gap filling and choose a reducer and window size.
 11. Click **CALCULATE & EXPORT**.
@@ -47,7 +47,7 @@ number of selected years x number of selected variables x number of selected sta
 
 Large year ranges, daily products, large AOIs, Landsat exports, or many variables can create many slow tasks. Start with a small AOI and a few statistics when testing a workflow.
 
-## App Inputs And Parameters
+## App inputs and parameters
 
 | Panel option | Default | Meaning |
 | --- | --- | --- |
@@ -65,15 +65,15 @@ Large year ranges, daily products, large AOIs, Landsat exports, or many variable
 | Apply QA / Cloud Mask | On | Applies MODIS product QA masks. Landsat fmask is always applied in the Landsat branch. |
 | Apply Temporal Gap Fill | Off | Fills masked pixels from neighboring dates before annual statistics are computed. |
 
-## Area Of Interest Options
+## Area Of Interest options
 
-### Draw On Map
+### Draw on map
 
 Use **Rectangle** or **Polygon** to digitize an AOI. The app stores the geometry in a map drawing layer named `AOI`. Use **Clear** to remove it and **Hide AOI** / **Show AOI** to toggle display.
 
 If more than one geometry exists in the drawing layer, the app converts the geometries to a FeatureCollection and uses their combined geometry.
 
-### GEE Asset
+### GEE asset
 
 Choose **GEE Asset**, enter a FeatureCollection path such as:
 
@@ -84,11 +84,11 @@ projects/project-name/assets/asset-name
 
 Then click **Load Asset**. The app uses `ee.FeatureCollection(path).geometry()` as the export region and processing bounds.
 
-## Available Products
+## Available products
 
 The app currently exposes 10 product choices: 9 MODIS/MCD products and 1 harmonized Landsat product. MODIS/MCD products use the regular single-collection pipeline. Landsat uses a dedicated multi-mission merge and harmonization pipeline.
 
-### MODIS And MCD Products
+### MODIS and MCD products
 
 | Product in UI | Earth Engine collection | Resolution | Cadence | Exposed variables |
 | --- | --- | --- | --- | --- |
@@ -122,7 +122,7 @@ The app currently exposes 10 product choices: 9 MODIS/MCD products and 1 harmoni
 
 The code also computes `CSI` and `MIRBI` inside `MOD09A1_burnIndices`, but the current UI registry exposes only `NBR` from that function. You can expose those bands by adding variable entries in the `PRODUCTS` registry.
 
-### Landsat Product
+### Landsat product
 
 | Product in UI | Earth Engine collections | Resolution | Cadence used by app | Exposed variables |
 | --- | --- | --- | --- | --- |
@@ -136,7 +136,7 @@ The Landsat branch supports:
 | Landsat 7 | ETM+ | 1999 onward in the catalog | Collection 2, Tier 1, Level 2. SLC-off gaps after 2003 may remain unless nearby scenes can fill them. |
 | Landsat 8 | OLI/TIRS | 2013 onward in the catalog | Collection 2, Tier 1, Level 2. |
 
-#### Landsat Processing
+#### Landsat processing
 
 The Landsat product is not a single catalog collection. The app builds it each time a Landsat variable is requested:
 
@@ -158,7 +158,7 @@ The Landsat product is not a single catalog collection. The app builds it each t
 
 For Landsat, the **Apply QA / Cloud Mask** checkbox does not disable fmask. Cloud and cloud-shadow masking is always applied inside the Landsat pipeline.
 
-## Annual Aggregation Functions
+## Annual aggregation functions
 
 The following statistics are exposed under **Annual Statistics**.
 
@@ -186,7 +186,7 @@ Implementation note: the app derives DOY with Earth Engine `img.date().getRelati
 
 `Springness` and `Winterness` depend on `DOY_Max`. The export loop pre-computes `DOY_Max` once per variable-year when one of those statistics is requested.
 
-## QA And Cloud Masking
+## QA And cloud masking
 
 The **Apply QA / Cloud Mask** option is enabled by default. It controls MODIS/MCD QA masks. When unchecked, the app skips the product-level and variable-level MODIS QA masks defined in the registry.
 
@@ -204,7 +204,7 @@ The **Apply QA / Cloud Mask** option is enabled by default. It controls MODIS/MC
 
 Masking improves scientific quality but reduces the number of valid observations. This matters for `CumSum`, `GSL`, and phenology metrics because those statistics depend strongly on how many valid dates remain.
 
-## Temporal Gap Filling
+## Temporal gap filling
 
 Temporal gap filling is optional and disabled by default. It is applied after masking and variable calculation, but before the final annual statistic.
 
@@ -218,7 +218,7 @@ When enabled, the app:
 6. Loads extra dates before January 1 and after December 31 so year-edge observations can be filled from neighboring dates.
 7. Filters the filled collection back to the requested calendar year before annual aggregation.
 
-### Gap-Fill Options
+### Gap-fill options
 
 | Option | Values | Meaning |
 | --- | --- | --- |
@@ -248,7 +248,7 @@ For example:
 MOD13Q1_NDVI_Mean_2020_GFMedianW5
 ```
 
-## Export Options
+## Export options
 
 The app uses `Export.image.toDrive()` for every selected year-variable-statistic combination.
 
@@ -265,7 +265,7 @@ The app uses `Export.image.toDrive()` for every selected year-variable-statistic
 | `scale` | Scale text box. It is auto-set to the product resolution when the product changes. |
 | `maxPixels` | Max pixels text box, default `1e9`. |
 
-### Filename Pattern
+### Filename pattern
 
 Base filename:
 
@@ -300,11 +300,11 @@ Example:
 MOD13Q1_NDVI_Mean_2020_GFMedianW5_i16x10000
 ```
 
-### Float32 Encoding
+### Float32 encoding
 
 `Float32 (original)` is the default. The app exports the statistic as Float32 with no integer scale factor and no encoding suffix. This is the safest option when you want to avoid quantization or integer clipping.
 
-### Compact Integer Encoding
+### Compact integer encoding
 
 `Compact integer (auto)` reduces file size by scaling values and casting them to `Int16` or `Int32`. To recover the original approximate value, divide by the factor in the filename.
 
@@ -326,7 +326,7 @@ Before integer casting, the app multiplies by the factor and clamps to the chose
 
 Compact mode is useful for storage and GIS interoperability, but Float32 is better when preserving exact numeric precision is more important than file size.
 
-## Processing Order
+## Processing order
 
 For each selected product, year, variable, and statistic, the app follows this order:
 
@@ -347,11 +347,11 @@ For each selected product, year, variable, and statistic, the app follows this o
 10. Create a Drive export task.
 11. Add the first result to the map as a preview layer.
 
-## Extending The App With Your Own Variables
+## Extending the app with your own variables
 
 Most custom work happens in the `PRODUCTS` registry. The variable checkboxes are generated automatically from `PRODUCTS[productKey].variables`, so adding a variable there makes it appear in the UI.
 
-### Add A Direct Catalog Band Variable
+### Add a direct catalog band variable
 
 Use this pattern when the product already has the band you need and it only needs scaling:
 
@@ -372,7 +372,7 @@ If a variable needs a different QA mask from the product default, add `qaMask`:
 }
 ```
 
-### Add A Computed MODIS Variable
+### Add a computed MODIS variable
 
 Use this pattern when the variable is calculated from one or more image bands:
 
@@ -405,7 +405,7 @@ Always preserve `system:time_start`. Phenology, sorting, and temporal gap fillin
 
 For MODIS surface reflectance products, compute functions are responsible for applying any needed scale factors. Pure ratios such as NDVI cancel the scale factor, but formulas with additive constants, such as EVI or SAVI-like indices, should generally use reflectance units.
 
-### Add A Landsat Reflectance Index
+### Add a Landsat reflectance index
 
 For a new Landsat reflectance index, write a function that uses the harmonized common band names:
 
@@ -438,13 +438,13 @@ Then expose it under the Landsat product:
 
 The Landsat branch will apply scale factors, rename bands, fmask clouds and shadows, harmonize LT5/LT7 to OLI-like reflectance, and then run the index function.
 
-### Add A Landsat Tasseled Cap-Like Variable
+### Add a Landsat Tasseled Cap-like variable
 
 Tasseled Cap variables use mission-specific functions because coefficients differ by sensor. Add one function for LT5, LT7, and LT8, register them in `LT_TCT_FNS`, and expose the new variable in the Landsat product.
 
 Use this route only for variables that genuinely need mission-specific coefficients before harmonization. For ordinary reflectance indices, use `LT_INDEX_FNS` instead.
 
-## Adding A New Product
+## Adding a new product
 
 For a MODIS-like single-collection product, add a new entry to `PRODUCTS`:
 
@@ -474,7 +474,7 @@ The generic MODIS-style branch in `loadAndProcessCollection()` handles:
 
 For a product that needs multi-collection merging, mission-specific handling, joins, or custom filtering, add a dedicated branch in `loadAndProcessCollection()` similar to the Landsat branch.
 
-## Adding A New Annual Statistic
+## Adding a new annual statistic
 
 To add a statistic:
 
@@ -494,7 +494,7 @@ case 'P50':
   return yearCol.reduce(ee.Reducer.percentile([50]));
 ```
 
-## Practical Guidance
+## Practical guidance
 
 - Prefer MODIS/MCD products for long, regular, coarse-resolution time series.
 - Prefer Landsat when 30 m spatial detail is more important than temporal regularity.
@@ -505,7 +505,7 @@ case 'P50':
 - For compact integer exports, always record and apply the filename scale factor during downstream analysis.
 - Start with one year, one variable, and one statistic to verify settings before creating many export tasks.
 
-## Code Map
+## Code map
 
 | Section in `EFA_Calculator_App.js` | Purpose |
 | --- | --- |
@@ -521,7 +521,7 @@ case 'P50':
 | Section 9 | Event handlers, validation, export task creation loop, and AOI handling. |
 | Section 10 | Initial map center and basemap. |
 
-## References Mentioned In The App
+## References mentioned in the app
 
 - Alcaraz-Segura et al. (2006) - Ecosystem Functional Attributes framework and applications.
 - Paruelo et al. (2001) - Ecosystem functional types.
