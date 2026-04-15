@@ -1,204 +1,174 @@
-# CLAUDE.md — GEE Ecosystem Functional Attributes App
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+---
 
 ## Project overview
 
-You are an expert in the Google Earth Engine (GEE) geospatial cloud computing platform, with deep knowledge of its JavaScript API. This project implements a GEE Code Editor application for dense satellite image time series analysis, focused on computing Ecosystem Functional Attributes (EFAs) from MODIS products.
+This is a **Google Earth Engine (GEE) Code Editor application** — a single JavaScript file that runs entirely in the browser at code.earthengine.google.com. It computes Ecosystem Functional Attributes (EFAs) from satellite image time series and exports annual per-pixel statistics to Google Drive.
 
-EFAs are annualized, per-pixel statistics that quantify ecologically meaningful aspects of annual spectral or biophysical variable time series — including their central tendency, variability, and phenological timing. These statistics support monitoring of land surface functional states across ecosystems.
-
----
-
-## Platform and language
-
-- The app is contained in file EFA_Calculator_App.js
-- All the remaining folders and files beyond the main app file (EFA_Calculator_App.js) are just to support some parts of the implementation but not meant to be directly used or invoked
-
-- **Environment**: Google Earth Engine Code Editor (JavaScript)
-- **API**: GEE JavaScript API (`ee.*` namespace, `ui.*` namespace for GUI)
-- **Target runtime**: Browser-based GEE Code Editor at code.earthengine.google.com
-- **No Node.js, no Python, no external dependencies** — all code must run natively in the GEE Code Editor
+**No build tools, no tests, no Node.js.** The only "run" command is: paste `EFA_Calculator_App.js` into the GEE Code Editor and click Run.
 
 ---
 
-## Priority MODIS products
+## File roles
 
-The following MODIS products are the primary data sources. Each product determines which spectral variables and dimensions are available.
-
-| Product     | Resolution | Primary layers / uses                          |
-|-------------|------------|------------------------------------------------|
-| MOD09Q1     | 250 m      | SR bands 1–2; NDVI, EVI2, NDWI, brightness     |
-| MOD09A1     | 500 m      | SR bands 1–7; all spectral indices, TCT        |
-| MOD11A1     | 1 km       | LST day/night (daily)                          |
-| MOD11A2     | 1 km       | LST day/night (8-day)                          |
-| MOD13Q1     | 250 m      | NDVI, EVI (pre-computed VI product)            |
-| MOD17A2H    | 500 m      | GPP (gross primary production)                 |
-| MCD43A1     | 500 m      | BRDF model parameters; broadband albedo, NBAR  |
-
-When a product is selected, only the variables and indices derivable from that product's available bands should be enabled in the GUI. Enforce this constraint explicitly in code.
+| File / Folder | Role |
+|---|---|
+| `EFA_Calculator_App.js` | **The app.** All production code. Do not break this into modules — GEE Code Editor runs a single script. |
+| `TS_SupportScripts/Landsat.js` | Reference implementations of Landsat VI and TCT functions (mission-specific). Read this before adding any Landsat logic. |
+| `TS_SeverusCodebase/SeverusPT/DataPreparation/HarmonizedLandsatCollections_v2` | Reference for multi-mission Landsat harmonization (LT5/LT7/LT8, C02/T1_L2, `etmToOli` coefficients). |
+| `TS_SeverusCodebase/SeverusPT/DataPreparation/HarmonizedLandsatCollections_TCT_v1` | Reference for applying mission-specific TCT functions per-sensor before merging collections. |
+| `TS_SeverusCodebase/SeverusPT/DataPreparation/HarmonizedLandsatCollections_LST_v1` | Reference for extracting LST from Landsat thermal bands (`ST_B10` for LT8, `ST_B6` for LT5/LT7). |
+| `TS_SupportScripts/MODIS.js`, `Sentinel2.js` | Reference implementations for MODIS and Sentinel-2 spectral indices. |
+| All other folders | Supporting scripts and experiments — not used in the app. |
 
 ---
 
-## Spectral variables and biophysical dimensions
+## App architecture (`EFA_Calculator_App.js`)
 
-Implement the following dimensions per product where applicable. Define each as a named function that takes an image and returns a single-band image with a consistent band name.
+The file is structured in 10 clearly labelled sections:
 
-### Vegetation indices
-- **NDVI** — Normalized Difference Vegetation Index
-- **EVI** — Enhanced Vegetation Index (2-band variant for MOD09Q1)
-- **SAVI** — Soil-Adjusted Vegetation Index
-- **NDWI** — Normalized Difference Water Index (Gao: NIR/SWIR; McFeeters: Green/NIR)
-- **LSWI** — Land Surface Water Index
+| Section | Content |
+|---|---|
+| 1 | QA mask functions per product (`maskQA_MOD09A1`, `maskQA_MOD11_Day`, etc.) + DOY/circular helpers |
+| 2 | Spectral index compute functions (`MOD09A1_SpectralIndices`, `MOD09A1_TCT`, `MOD09A1_burnIndices`, etc.) |
+| 3 | BRDF/Albedo functions (`bsAlbedo`, `wsAlbedo`, `computeAllAlbedo_MCD43A1`) |
+| 4 | **`PRODUCTS` registry** — the central config object |
+| 5 | Statistics engine (`computeStatistic` switch, `viTSdateOfMax/Min`, `gapFillTemporalReducer`) |
+| 6 | Collection loading pipeline (`loadAndProcessCollection`, `createExportTask`, `getDefaultVisParams`) |
+| 7 | UI widget definitions |
+| 8 | Main panel assembly |
+| 9 | Event handlers (product change, AOI drawing, calculate button) |
+| 10 | Map initialization |
 
-### Productivity
-- **GPP** — Gross Primary Production (MOD17A2H)
-- **fPAR** — Fraction of absorbed photosynthetically active radiation (where available)
+### The `PRODUCTS` registry (Section 4)
 
-### Land surface temperature
-- **LST_Day** — Daytime land surface temperature (K → °C)
-- **LST_Night** — Nighttime land surface temperature
-- **LST_Delta** — Diurnal temperature range (Day − Night)
+Everything data-source-specific lives here. Adding a new satellite product means adding one entry:
 
-### Albedo and reflectance
-- **Albedo_BSA** — Black-sky albedo (shortwave broadband, MCD43A1)
-- **Albedo_WSA** — White-sky albedo
-- **Surface brightness** — Mean of visible bands
+```js
+'Product Label (res, cadence)': {
+  geeId: 'GEE_COLLECTION_ID',
+  resolution: 30,                // meters, auto-filled in the Scale input
+  temporal: '16-day',            // or 'Daily', '8-day', '4-day'
+  qaMask: maskFunctionOrNull,    // product-level QA; null if per-variable
+  variables: {
+    'VariableName': {
+      compute: computeFn,        // fn(img) → single-band image, OR
+      band: 'band_name',         // band to select after compute()
+      // --- OR direct band selection path: ---
+      // band: 'RAW_BAND', scale: 0.0001,
+      // --- optional per-variable QA override: ---
+      // qaMask: maskFnForThisVar
+    }
+  }
+}
+```
 
-### Tasseled Cap Transforms (TCT)
-- **TC_Brightness**
-- **TC_Greenness**
-- **TC_Wetness**
+There are two routing paths in `loadAndProcessCollection`:
+- **compute path**: `varConfig.compute` exists → call `col.map(varConfig.compute).select([varConfig.band])`
+- **scale path**: no `compute` → `col.map(img => img.select(band).toFloat().multiply(scale))`
 
-Compute TCT from MOD09A1 NBAR surface reflectance using published coefficients.
+### Product → variable → checkbox chain
 
----
+When the product dropdown changes (`productSelect.onChange`), `varsPanel` is cleared and rebuilt from `PRODUCTS[key].variables`. The `scaleInput` is auto-set to `product.resolution`. This is the only place where the variable checkbox list is constructed — there is no static variable list.
 
-## Annual EFA statistics
+### Statistics engine (Section 5)
 
-All statistics are computed per pixel over the annual time series (all composites within the selected calendar year). Implement each as a named reducer or mapping function over an `ee.ImageCollection`.
+`computeStatistic(yearCol, statName, doyMaxImage)` is a switch over `statName`. To add a new statistic: add it to `STAT_CATEGORIES` (Section 5), add a `case` in `computeStatistic`, and the UI checkbox appears automatically.
 
-### Centrality
-- `mean` — arithmetic mean
-- `median` — 50th percentile
-- `p05` — 5th percentile
-- `p95` — 95th percentile
-- `min` / `max`
-
-### Dispersion
-- `iqr` — interquartile range (p95 − p05)
-- `std` — standard deviation
-- `mad` — median absolute deviation
-- `cv` — coefficient of variation (std / mean), masked where mean ≈ 0
-- `range` — max − min
-
-### Phenology (circular / DOY statistics)
-- `doy_max` — day of year of maximum value
-- `doy_min` — day of year of minimum value
-- `doy_p05` — day of year when cumulative distribution reaches 5th percentile
-- `doy_p95` — day of year when cumulative distribution reaches 95th percentile
-
-**Important**: DOY statistics are circular. Implement trigonometric linearization for DOY values before computing mean or dispersion statistics on them:
-- Convert DOY to angle: `θ = 2π × DOY / 365`
-- Compute `sin(θ)` and `cos(θ)` component images
-- Derive circular mean as `atan2(mean_sin, mean_cos)` and convert back to DOY
-- Circular standard deviation: `sqrt(-2 × ln(R))` where `R` is the mean resultant length
-
-### Distributional shape
-- `skewness` — (use `ee.Reducer.skew()` or implement manually)
-- `kurtosis` — (use `ee.Reducer.kurtosis()` or implement manually)
+`Springness` and `Winterness` depend on `doyMaxImage` being pre-computed; the export loop detects this via `needsDoyMax` and caches `viTSdateOfMax` per variable × year.
 
 ---
 
-## GUI specification
+## Landsat harmonization — reference patterns
 
-Build the full GUI using `ui.*` components. The interface must include:
+### Band naming convention (used in Landsat.js TCT functions)
 
-### Panels and layout
-- A main side panel (left or right) containing all controls
-- A map panel occupying the remaining area
-- A results/status panel showing export job status and log messages
+All TCT and VI functions in `Landsat.js` expect **renamed bands**: `Blue`, `Green`, `Red`, `NIR`, `SWIR1`, `SWIR2`. The harmonization pipeline renames raw GEE band names before applying any index function.
 
-### Controls
+| Sensor | Raw optical bands | Raw thermal |
+|---|---|---|
+| LT8 (OLI) | `SR_B2,3,4,5,6,7` → `Blue,Green,Red,NIR,SWIR1,SWIR2` | `ST_B10` → `LST` |
+| LT7 (ETM+) | `SR_B1,2,3,4,5,7` → same | `ST_B6` → `LST` |
+| LT5 (TM) | `SR_B1,2,3,4,5,7` → same | `ST_B6` → `LST` |
 
-| Control              | Type                      | Notes                                                     |
-|----------------------|---------------------------|-----------------------------------------------------------|
-| AOI selector         | Draw on map + geometry input | Support drawn rectangle, polygon, or uploaded asset   |
-| Year selector        | Dropdown (`ui.Select`)    | Range: 2000–present (auto-detect available years)         |
-| MODIS product        | Dropdown (`ui.Select`)    | Selecting product updates available variables             |
-| Target CRS           | Dropdown + text input     | Common options: EPSG:4326, EPSG:32629, custom EPSG        |
-| Variable toggles     | Checkboxes (`ui.Checkbox`)| Only show variables valid for selected product            |
-| Statistic toggles    | Checkboxes (`ui.Checkbox`)| Grouped by category: centrality / dispersion / phenology  |
-| Preview map button   | `ui.Button`               | Visualize a selected variable × statistic on the map      |
-| Calculate & export   | `ui.Button`               | Submit one export task per selected combination           |
-| Export folder name   | `ui.Textbox`              | Google Drive destination folder                           |
-| Clear AOI button     | `ui.Button`               |                                                           |
+Scaling: `SR_B* × 0.0000275 − 0.2` (optical), `ST_B* × 0.00341802 + 149.0` (thermal, Kelvin).
 
-### Product → variable dependency
-Implement a `productConfig` object that maps each product ID to its available variables. When the product selector changes, rebuild the variable checkbox panel to show only valid options and grey out or hide invalid ones.
+### ETM+→OLI harmonization coefficients
+
+LT5 and LT7 bands are cross-calibrated to OLI equivalents **before** computing indices or TCT. The coefficients object is:
+
+```js
+var coefficients = {
+  itcps: ee.Image.constant([0.0003, 0.0088, 0.0061, 0.0412, 0.0254, 0.0172]),
+  slopes: ee.Image.constant([0.8474, 0.8483, 0.9047, 0.8462, 0.8937, 0.9071])
+};
+// Applied as: img.multiply(slopes).add(itcps)  (bands: Blue,Green,Red,NIR,SWIR1,SWIR2)
+```
+
+**Important**: TCT must be computed **before** the `etmToOli` harmonization step when using mission-specific TCT coefficients (see `HarmonizedLandsatCollections_TCT_v1`). TCT after harmonization should use LT8 coefficients.
+
+### Mission-specific TCT functions (from `Landsat.js`)
+
+Functions follow the naming pattern `lt{5|7|8}_tct{b|g|w}(image)`:
+- Returns a single-band image renamed `TCTB`, `TCTG`, or `TCTW`
+- Expects renamed bands (`Blue`, `Green`, `Red`, `NIR`, `SWIR1`, `SWIR2`)
+- LT5: Crist (1985) coefficients; LT7: Huang et al. (2002); LT8: Baig et al. (2014)
+
+### Cloud masking for Landsat (C02/T1_L2)
+
+`fmask` uses `QA_PIXEL` bits: bit 3 = cloud shadow, bit 5 = cloud.
+
+```js
+function fmask(img) {
+  var qa = img.select('pixel_qa');  // renamed from QA_PIXEL
+  var mask = qa.bitwiseAnd(1 << 3).eq(0).and(qa.bitwiseAnd(1 << 5).eq(0));
+  return img.updateMask(mask);
+}
+```
+
+### Landsat LST
+
+LST is retrieved directly from the Surface Temperature product band (already a physical temperature in Kelvin after scaling). Subtract 273.15 for °C. There is **no emissivity correction needed** — the C02 `ST_B*` bands are fully processed LST, not raw radiance. No mission-specific adjustment is needed since all three sensors provide independently calibrated `ST_B` values.
 
 ---
 
-## Export behavior
+## EFA variables available for Landsat
 
-- Each export task targets Google Drive via `Export.image.toDrive()`
-- One task is created per combination of: `year × variable × statistic`
-- Filename convention: `{product}_{variable}_{stat}_{year}_EPSG{code}`
-- Export at native product resolution unless overridden
-- CRS and CRS transform derived from the selected product's native grid or the user-specified CRS
-- All exported images are single-band Float32 unless otherwise noted
-- Add a confirmation dialog before submitting a large batch (> 10 tasks)
+All the following can be computed from the harmonized Blue/Green/Red/NIR/SWIR1/SWIR2 bands:
 
----
-
-## Code architecture
-
-
-### Key patterns to follow
-
-- Use `ee.Dictionary` and `ee.List` for config-driven logic where possible
-- Avoid `.getInfo()` calls in the main flow — use client-side callbacks and `.evaluate()` only where necessary
-- All per-pixel computation must use server-side `ee.*` operations
-- Use `.aside(print)` during development; remove before final version
-- Helper functions and borrowed code from the existing codebase are temporary scaffolding — document them clearly and refactor into the final structure before release
+| Variable | Formula / notes |
+|---|---|
+| NDVI | (NIR−Red)/(NIR+Red) |
+| EVI | 2.5×(NIR−Red)/(NIR+6×Red−7.5×Blue+1) |
+| SAVI | (1+L)×(NIR−Red)/(NIR+Red+L), L=0.5 |
+| NDWI | (NIR−SWIR1)/(NIR+SWIR1) — Gao variant |
+| NBR | (NIR−SWIR2)/(NIR+SWIR2) |
+| TCT_Brightness | Mission-specific coefficients |
+| TCT_Greenness | Mission-specific coefficients |
+| TCT_Wetness | Mission-specific coefficients |
+| LST | `ST_B10` (LT8) / `ST_B6` (LT5, LT7), scaled to K |
 
 ---
 
 ## Scientific grounding
 
-### EFA concept
+EFAs are annualized per-pixel statistics characterizing ecosystem functional state:
+- **Cabello et al. (2012)** — original EFA framework
+- **Alcaraz-Segura et al. (2006)** — EFA application
+- **Paruelo et al. (2001)** — ecosystem functional types
 
-Ecosystem Functional Attributes (EFAs) are derived from the concept of remote sensing-based functional diversity and ecosystem functioning monitoring, as developed in Cabello et al. (2012) and subsequent literature. Key principles:
-
-- EFAs describe the *functional state* of ecosystems through annual summaries of spectral and biophysical time series
-- They capture both the *magnitude* (centrality, extremes) and *temporal dynamics* (phenology, variability) of ecosystem activity
-- They are spatially explicit, spatially continuous, and annually repeatable — suitable for long-term monitoring and change detection
-
-### Recommended literature to consult
-
-- Cabello et al. (2012) — original EFA framework
-- Pettorelli et al. (2005) — NDVI and the dynamic world
-- Running et al. (2004) — global GPP from MODIS
-- Jetz et al. (2016) — essential biodiversity variables and remote sensing
-- Fisher et al. (2017) — vegetation phenology from remote sensing
-- Liang (2000) — broadband albedo conversion coefficients
-
-### Variables to investigate further
-
-- Solar-induced fluorescence (SIF) as a productivity proxy
-- FAPAR from MODIS LAI/FPAR product (MOD15A2H)
-- Fractional cover decomposition
-- Burn severity / disturbance indices (NBR, dNBR)
+Phenology statistics (DOY_Max, Springness, Winterness) are circular: DOY is converted to `sin(2π×DOY/365)` and `cos(2π×DOY/365)` before computing means or spatial analysis.
 
 ---
 
-## Constraints and best practices
+## GEE coding constraints
 
-- All GEE API calls must be valid for the JavaScript Code Editor — no Python `geemap` patterns
-- Use `.filterDate()`, `.filterBounds()`, and `.select()` early in collection pipelines to minimize computation
-- Mask clouds and poor-quality observations using each product's QA/QC band before computing statistics
-- For MOD11: mask LST where QC bits indicate poor retrieval
-- For MOD09: mask using the `state_1km` or `sur_refl_state_500m` QA band
-- Do not hardcode scale factors — apply them from the product metadata where possible
-- Output images must be inspectable on the map (add a default visualization layer on preview)
-- The app must run end-to-end without errors in the GEE Code Editor on first execution
-
----
+- No `.getInfo()` in the main flow — use `.evaluate()` with callbacks where needed
+- `.filterDate()`, `.filterBounds()`, `.select()` early in every pipeline
+- All per-pixel computation uses server-side `ee.*`
+- `Export.image.toDrive()` for all outputs; one call per year × variable × statistic combination
+- Export filename convention: `{product}_{variable}_{statistic}_{year}[_suffix]`
+- No Python/geemap patterns — JavaScript API only
