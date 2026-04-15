@@ -1,25 +1,29 @@
 /*
  * ============================================================================
- * EFA Calculator - MODIS Annual Statistics
+ * EFA Calculator - MODIS, Landsat & Sentinel-2 Annual Statistics
  * ============================================================================
  *
- * Computes Ecosystem Functional Attributes (EFAs) from MODIS & Landsat time series.
- * EFAs characterize ecosystem functioning through:
+ * Computes Ecosystem Functional Attributes (EFAs) from MODIS, Landsat &
+ * Sentinel-2 time series. EFAs characterize ecosystem functioning through:
  *   - Magnitude: annual mean/median (productivity proxy)
  *   - Seasonality: CV, StdDev, IQR (variation intensity)
  *   - Phenology: DOY of peak activity with circular transforms
  *
- * Supports 10 MODIS products, 20+ spectral/biophysical variables,
- * and 17 annual statistics across 4 categories. Includes a Landsat harmonized pipeline 
- * for reflectance indices and Tasseled Cap.
+ * Supports 10 MODIS products, 1 Landsat harmonized product, 1 Sentinel-2 product,
+ * 20+ spectral/biophysical variables, and 17 annual statistics across 4 categories.
+ * Includes Landsat harmonized and Sentinel-2 SR pipelines for reflectance indices
+ * and Tasseled Cap.
  *
  * References:
  *   Alcaraz-Segura et al. (2006) - EFA framework
  *   Paruelo et al. (2001) - Ecosystem functional types
  *   Schaaf et al. (2002) - BRDF/Albedo model
  *   Lobser & Cohen (2007) - MODIS Tasseled Cap coefficients
+ *   Roy et al. (2016) - Landsat ETM+/TM to OLI harmonization
+ *   Crist (1985), Huang et al. (2002), Baig et al. (2014) - Landsat TCT coefficients
+ *   Shi & Xu (2019) - Sentinel-2 TCT coefficients (IEEE JSTARS 12:4038-4048)
  *
- * Version: v0.2 (2026-04-15)
+ * Version: v0.3 (2026-04-16)
  * ============================================================================
  */
 
@@ -312,6 +316,111 @@ var LT_TCT_FNS = {
   'TCT_Brightness': {lt5: LT5_TCT_B, lt7: LT7_TCT_B, lt8: LT8_TCT_B},
   'TCT_Greenness':  {lt5: LT5_TCT_G, lt7: LT7_TCT_G, lt8: LT8_TCT_G},
   'TCT_Wetness':    {lt5: LT5_TCT_W, lt7: LT7_TCT_W, lt8: LT8_TCT_W}
+};
+
+
+// ============================================================================
+// SECTION 1C: SENTINEL-2 SR PIPELINE
+// ============================================================================
+// Supports: COPERNICUS/S2_SR_HARMONIZED — Level-2A SR, 2017-03-28 to present
+// Six core bands renamed to common schema (matching Landsat) before any computation.
+// SCL cloud/shadow masking is always applied inside the pipeline.
+// TCT uses Shi & Xu (2019) coefficients (6-band, PCP-derived, aligned to LT8 TCT space).
+// Ref: Shi, T. & Xu, H. (2019) IEEE JSTARS 12:4038-4048, doi:10.1109/JSTARS.2019.2938388
+// ============================================================================
+
+// ---- Scale factors (divide by 10000) ----
+function applyS2ScaleFactors(image) {
+  var optical = image.select('B.*').multiply(0.0001);
+  return image.addBands(optical, null, true);
+}
+
+// ---- Band renaming (6 core bands matched to Landsat schema) ----
+function renameS2(img) {
+  return img.select(
+    ['B2',   'B3',    'B4',  'B8',  'B11',   'B12'],
+    ['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2']
+  );
+}
+
+// ---- Cloud / shadow mask using SCL (Scene Classification Layer) ----
+// Removes: cloud shadow (3), medium-probability cloud (8),
+//          high-probability cloud (9), thin cirrus (10)
+function maskQA_S2(img) {
+  var scl = img.select('SCL');
+  return img.updateMask(
+    scl.neq(3).and(scl.neq(8)).and(scl.neq(9)).and(scl.neq(10))
+  );
+}
+
+// ---- Spectral indices (same set as Landsat; LST excluded — not available for S2) ----
+function S2_NDVI(img) {
+  return img.normalizedDifference(['NIR', 'Red']).rename('NDVI')
+    .set('system:time_start', img.get('system:time_start'));
+}
+function S2_EVI(img) {
+  return img.expression(
+    '2.5 * (NIR - RED) / (NIR + 6.0*RED - 7.5*BLUE + 1.0)', {
+      NIR:  img.select('NIR').toFloat(),
+      RED:  img.select('Red').toFloat(),
+      BLUE: img.select('Blue').toFloat()
+    }).rename('EVI').set('system:time_start', img.get('system:time_start'));
+}
+function S2_SAVI(img) {
+  return img.expression(
+    '1.5 * (NIR - RED) / (NIR + RED + 0.5)', {
+      NIR: img.select('NIR').toFloat(),
+      RED: img.select('Red').toFloat()
+    }).rename('SAVI').set('system:time_start', img.get('system:time_start'));
+}
+function S2_NDWI(img) {
+  // Gao variant: (NIR - SWIR1) / (NIR + SWIR1); SWIR1 = B11 (20 m)
+  return img.normalizedDifference(['NIR', 'SWIR1']).rename('NDWI')
+    .set('system:time_start', img.get('system:time_start'));
+}
+function S2_NBR(img) {
+  // (NIR - SWIR2) / (NIR + SWIR2); SWIR2 = B12 (20 m)
+  return img.normalizedDifference(['NIR', 'SWIR2']).rename('NBR')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+var S2_INDEX_FNS = {
+  'NDVI': S2_NDVI,
+  'EVI':  S2_EVI,
+  'SAVI': S2_SAVI,
+  'NDWI': S2_NDWI,
+  'NBR':  S2_NBR
+};
+
+// ---- Tasseled Cap (Shi & Xu 2019, 6-band PCP-derived, aligned to Landsat 8 OLI TCT) ----
+// Bands: Blue(B2), Green(B3), Red(B4), NIR(B8), SWIR1(B11), SWIR2(B12)
+// Note: coefficients derived for at-sensor reflectance; widely applied to SR data.
+function S2_TCT_B(img) {
+  return img.expression(
+    '(B*0.3037)+(G*0.2793)+(R*0.4743)+(N*0.5585)+(S1*0.5082)+(S2*0.1863)',
+    {B:img.select('Blue'),G:img.select('Green'),R:img.select('Red'),
+     N:img.select('NIR'),S1:img.select('SWIR1'),S2:img.select('SWIR2')})
+    .rename('TCTB').set('system:time_start', img.get('system:time_start'));
+}
+function S2_TCT_G(img) {
+  return img.expression(
+    '(B*-0.2848)+(G*-0.2435)+(R*-0.5436)+(N*0.7243)+(S1*0.0840)+(S2*-0.1800)',
+    {B:img.select('Blue'),G:img.select('Green'),R:img.select('Red'),
+     N:img.select('NIR'),S1:img.select('SWIR1'),S2:img.select('SWIR2')})
+    .rename('TCTG').set('system:time_start', img.get('system:time_start'));
+}
+function S2_TCT_W(img) {
+  return img.expression(
+    '(B*0.1509)+(G*0.1973)+(R*0.3279)+(N*0.3406)+(S1*-0.7112)+(S2*-0.4572)',
+    {B:img.select('Blue'),G:img.select('Green'),R:img.select('Red'),
+     N:img.select('NIR'),S1:img.select('SWIR1'),S2:img.select('SWIR2')})
+    .rename('TCTW').set('system:time_start', img.get('system:time_start'));
+}
+
+var S2_TCT_FNS = {
+  'TCT_Brightness': S2_TCT_B,
+  'TCT_Greenness':  S2_TCT_G,
+  'TCT_Wetness':    S2_TCT_W
 };
 
 
@@ -619,6 +728,29 @@ var PRODUCTS = {
       'TCT_Wetness':    {band: 'TCTW'},
       'LST':            {band: 'LST'}
     }
+  },
+
+  // ---- Sentinel-2 SR Harmonized (S2A + S2B, Level-2A, 10/20m) ----
+  // Collection loading is handled by a dedicated branch in loadAndProcessCollection.
+  // SCL cloud masking is always applied; no cross-sensor harmonization needed.
+  // TCT uses Shi & Xu (2019) 6-band coefficients aligned to Landsat 8 TCT space.
+  // Per-variable resolution overrides product.resolution in the export loop.
+  'Sentinel-2 SR (10/20m, 5-day)': {
+    type: 'sentinel2',
+    geeId: 'COPERNICUS/S2_SR_HARMONIZED',
+    resolution: 20,        // default scale shown in UI; NDVI/EVI/SAVI export at 10m
+    temporal: '5-day',
+    qaMask: null,          // SCL masking handled inside the Sentinel-2 pipeline
+    variables: {
+      'NDVI':           {band: 'NDVI',  resolution: 10},
+      'EVI':            {band: 'EVI',   resolution: 10},
+      'SAVI':           {band: 'SAVI',  resolution: 10},
+      'NDWI':           {band: 'NDWI',  resolution: 20},
+      'NBR':            {band: 'NBR',   resolution: 20},
+      'TCT_Brightness': {band: 'TCTB',  resolution: 20},
+      'TCT_Greenness':  {band: 'TCTG',  resolution: 20},
+      'TCT_Wetness':    {band: 'TCTW',  resolution: 20}
+    }
   }
 };
 
@@ -854,6 +986,44 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
       col = lt8raw.map(mkIdx8)
         .merge(lt7raw.map(mkIdx57))
         .merge(lt5raw.map(mkIdx57));
+    }
+
+    col = col.sort('system:time_start');
+    if (gapFillOptions.enabled) {
+      col = gapFillTemporalReducer(col, gapFillOptions.window, gapFillOptions.method);
+    }
+    return col.filterDate(startDate, endDate).sort('system:time_start');
+  }
+
+  // ---- Sentinel-2 SR Harmonized branch ----
+  if (product.type === 'sentinel2') {
+    var s2Filter = ee.Filter.and(
+      ee.Filter.bounds(aoi),
+      ee.Filter.date(loadStartDate, loadEndDate)
+    );
+    var s2raw = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED').filter(s2Filter);
+
+    // SCL cloud/shadow mask is always applied (mirrors fmask behaviour in Landsat branch)
+    s2raw = s2raw.map(maskQA_S2);
+
+    var col;
+    if (varName === 'TCT_Brightness' || varName === 'TCT_Greenness' ||
+        varName === 'TCT_Wetness') {
+      var s2TctFn = S2_TCT_FNS[varName];
+      col = s2raw.map(function(img) {
+        var orig = img;
+        img = applyS2ScaleFactors(img);
+        img = renameS2(img);
+        return ee.Image(s2TctFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
+      });
+    } else {
+      var s2IdxFn = S2_INDEX_FNS[varName];
+      col = s2raw.map(function(img) {
+        var orig = img;
+        img = applyS2ScaleFactors(img);
+        img = renameS2(img);
+        return ee.Image(s2IdxFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
+      });
     }
 
     col = col.sort('system:time_start');
@@ -1099,7 +1269,7 @@ var S = {
 // --- Title ---
 var titleLabel = ui.Label('EFA Calculator', S.title);
 var subtitleLabel = ui.Label(
-  'Ecosystem Functional Attributes from MODIS & Landsat Annual Time Series', S.subtitle);
+  'Ecosystem Functional Attributes from MODIS, Landsat & Sentinel-2 Annual Time Series', S.subtitle);
 
 // ---- 1. AOI Section ----
 var aoiHeader = ui.Label('1. Area of Interest', S.section);
@@ -1268,7 +1438,8 @@ var qaMaskCheckbox = ui.Checkbox({
 var qaMaskInfo = ui.Label(
   'For MODIS: removes clouds, cloud shadows, cirrus, and low-quality ' +
   'observations using each product\'s QA/QC band(s).\n' +
-  'For Landsat Harmonized: fmask (cloud + cloud shadow) is always applied.',
+  'For Landsat Harmonized: fmask (cloud + cloud shadow) is always applied.\n' +
+  'For Sentinel-2 SR: SCL cloud/shadow masking is always applied inside the pipeline.',
   {fontSize: '10px', color: '#7f8c8d', margin: '1px 0 4px 12px', whiteSpace: 'pre-wrap'}
 );
 
@@ -1526,6 +1697,12 @@ productSelect.onChange(function(productKey) {
       ' | fmask cloud masking always applied\n' +
       '  LT5: 1984–2013 · LT7: 1999–present · LT8: 2013–present\n' +
       '  TCT uses mission-specific coefficients; reflectance indices harmonized to OLI.';
+  } else if (product.type === 'sentinel2') {
+    infoText = '10/20m | ' + product.temporal + ' | ' + varNames.length +
+      ' variable(s) | SCL cloud masking always applied\n' +
+      '  S2A/B: 2017–present\n' +
+      '  10 m: NDVI, EVI, SAVI  ·  20 m: NDWI, NBR, TCT\n' +
+      '  TCT: Shi & Xu (2019), 6-band PCP, aligned to Landsat 8 TCT space.';
   } else {
     infoText = product.resolution + 'm | ' + product.temporal +
       ' | ' + varNames.length + ' variable(s)' +
@@ -1704,6 +1881,12 @@ calcButton.onClick(function() {
       var varName = selectedVars[v];
       var imgCol = loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions);
 
+      // Per-variable resolution override (e.g. Sentinel-2: 10m for NDVI/EVI/SAVI, 20m for rest)
+      var varCfg = PRODUCTS[productKey].variables[varName];
+      var effectiveScale = (varCfg && varCfg.resolution !== undefined)
+        ? varCfg.resolution
+        : scale;
+
       // Pre-compute DOY_Max if needed (cached per variable × year)
       var doyMaxImage = null;
       if (needsDoyMax) {
@@ -1717,7 +1900,7 @@ calcButton.onClick(function() {
         if (result) {
           var desc = productShort + '_' + varName + '_' + statName + '_' + year +
             gapFillOptions.suffix;
-          createExportTask(result, desc, aoi, crs, scale, folder, maxPx,
+          createExportTask(result, desc, aoi, crs, effectiveScale, folder, maxPx,
             productKey, varName, statName, exportOptions);
           exportCount++;
 
