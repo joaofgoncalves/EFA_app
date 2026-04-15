@@ -86,7 +86,7 @@ Then click **Load Asset**. The app uses `ee.FeatureCollection(path).geometry()` 
 
 ## Available products
 
-The app currently exposes 10 product choices: 9 MODIS/MCD products and 1 harmonized Landsat product. MODIS/MCD products use the regular single-collection pipeline. Landsat uses a dedicated multi-mission merge and harmonization pipeline.
+The app currently exposes 12 product choices: 9 MODIS/MCD products, 1 harmonized Landsat product, and 1 Sentinel-2 SR product. MODIS/MCD products use the regular single-collection pipeline. Landsat and Sentinel-2 each use dedicated pipelines with sensor-specific band renaming, cloud masking, and Tasseled Cap coefficients.
 
 ### MODIS and MCD products
 
@@ -158,6 +158,48 @@ The Landsat product is not a single catalog collection. The app builds it each t
 
 For Landsat, the **Apply QA / Cloud Mask** checkbox does not disable fmask. Cloud and cloud-shadow masking is always applied inside the Landsat pipeline.
 
+### Sentinel-2 product
+
+| Product in UI | Earth Engine collection | Resolution | Cadence used by app | Exposed variables |
+| --- | --- | --- | --- | --- |
+| `Sentinel-2 SR (10/20m, 5-day)` | `COPERNICUS/S2_SR_HARMONIZED` | 10 m (NDVI, EVI, SAVI) / 20 m (NDWI, NBR, TCT) | 5-day nominal | `NDVI`, `EVI`, `SAVI`, `NDWI`, `NBR`, `TCT_Brightness`, `TCT_Greenness`, `TCT_Wetness` |
+
+| Mission | Sensor | Period |
+| --- | --- | --- |
+| Sentinel-2A | MSI | Level-1C from 2015-06-23; Level-2A SR (harmonized) from 2017-03-28 |
+| Sentinel-2B | MSI | Level-2A SR (harmonized) from 2017-03-28 |
+
+#### Sentinel-2 processing
+
+The Sentinel-2 product uses the `COPERNICUS/S2_SR_HARMONIZED` collection, which normalizes the reflectance quantification value across processing baseline versions for long-term time series consistency.
+
+1. Load `COPERNICUS/S2_SR_HARMONIZED` for the AOI and date range.
+2. Apply SCL cloud masking: removes cloud shadow (SCL = 3), medium-probability cloud (SCL = 8), high-probability cloud (SCL = 9), and thin cirrus (SCL = 10).
+3. Apply scale factor: multiply reflectance bands by `0.0001`.
+4. Rename six core bands to the common schema used across all spectral pipelines:
+   - `B2 → Blue`, `B3 → Green`, `B4 → Red`, `B8 → NIR`, `B11 → SWIR1`, `B12 → SWIR2`
+5. Route the variable:
+   - Reflectance indices (`NDVI`, `EVI`, `SAVI`, `NDWI`, `NBR`): computed from renamed SR bands.
+   - Tasseled Cap (`TCT_Brightness`, `TCT_Greenness`, `TCT_Wetness`): Shi & Xu (2019) 6-band PCP-derived coefficients, aligned to the Landsat 8 OLI TCT space.
+6. Sort by `system:time_start`.
+
+`LST` is not available for Sentinel-2 (no thermal band in MSI).
+
+#### Sentinel-2 export resolution per variable
+
+The export scale is set automatically per variable. The Scale field in the UI shows the product default (20 m) but is overridden per variable during export task creation.
+
+| Variable | Limiting band(s) | Native resolution | Export scale |
+| --- | --- | --- | --- |
+| `NDVI` | B4 (Red), B8 (NIR) | 10 m | 10 m |
+| `EVI` | B2 (Blue), B4 (Red), B8 (NIR) | 10 m | 10 m |
+| `SAVI` | B4 (Red), B8 (NIR) | 10 m | 10 m |
+| `NDWI` | B8 (NIR), B11 (SWIR1) | 20 m (B11) | 20 m |
+| `NBR` | B8 (NIR), B12 (SWIR2) | 20 m (B12) | 20 m |
+| `TCT_Brightness`, `TCT_Greenness`, `TCT_Wetness` | B11, B12 (SWIR) | 20 m | 20 m |
+
+For Sentinel-2, the **Apply QA / Cloud Mask** checkbox does not disable SCL masking. Cloud, cloud shadow, and cirrus masking are always applied inside the Sentinel-2 pipeline.
+
 ## Annual aggregation functions
 
 The following statistics are exposed under **Annual Statistics**.
@@ -201,6 +243,7 @@ The **Apply QA / Cloud Mask** option is enabled by default. It controls MODIS/MC
 | `MOD16A2` | Uses `ET_QC`; keeps MODLAND QA values `0` and `1` and requires no cloud. |
 | `MCD15A3H` | Uses `FparLai_QC` plus `FparExtra_QC`; removes cloud, cloud shadow, and significant cloud/ice contamination. |
 | Landsat Harmonized | Always uses fmask from `QA_PIXEL`: cloud shadow bit 3 must be `0`, and cloud bit 5 must be `0`. The MODIS QA checkbox does not disable this. |
+| Sentinel-2 SR | Always uses SCL: cloud shadow (SCL = 3), medium cloud (SCL = 8), high cloud (SCL = 9), and thin cirrus (SCL = 10) are masked. The MODIS QA checkbox does not disable this. |
 
 Masking improves scientific quality but reduces the number of valid observations. This matters for `CumSum`, `GSL`, and phenology metrics because those statistics depend strongly on how many valid dates remain.
 
@@ -511,6 +554,7 @@ case 'P50':
 | --- | --- |
 | Section 1 | MODIS QA masks plus DOY and circular transform helpers. |
 | Section 1B | Landsat scale factors, band renaming, fmask, harmonization, Landsat indices, Tasseled Cap, and LST helpers. |
+| Section 1C | Sentinel-2 scale factors, band renaming, SCL masking, spectral indices, and Tasseled Cap helpers (Shi & Xu 2019). |
 | Section 2 | MODIS spectral indices, Tasseled Cap, burn index helper, and MOD09Q1 NDVI. |
 | Section 3 | MCD43A1 BRDF/albedo functions. |
 | Section 4 | `PRODUCTS` registry. This controls product and variable options shown in the UI. |
@@ -529,3 +573,4 @@ case 'P50':
 - Lobser and Cohen (2007) - MODIS Tasseled Cap coefficients.
 - Roy et al. (2016) - Landsat ETM+/TM to OLI harmonization coefficients.
 - Crist (1985), Huang et al. (2002), and Baig et al. (2014) - Landsat Tasseled Cap coefficients used for LT5, LT7, and LT8 respectively.
+- Shi & Xu (2019) - Sentinel-2 Tasseled Cap coefficients (6-band PCP-derived, aligned to Landsat 8 OLI TCT space). IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sensing, 12(10), 4038–4048. doi:10.1109/JSTARS.2019.2938388
