@@ -898,12 +898,117 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     .sort('system:time_start');
 }
 
+// ---- Export encoding helpers ----
+var EXPORT_ENCODING_FLOAT = 'Float32 (original)';
+var EXPORT_ENCODING_COMPACT = 'Compact integer (auto)';
+
+var INT16_MIN = -32768;
+var INT16_MAX = 32767;
+var INT32_MIN = -2147483648;
+var INT32_MAX = 2147483647;
+
+function makeExportEncoding(type, factor) {
+  var isInt16 = (type === 'int16');
+  return {
+    type: type,
+    factor: factor,
+    suffix: '_' + (isInt16 ? 'i16' : 'i32') + 'x' + factor,
+    clampMin: isInt16 ? INT16_MIN : INT32_MIN,
+    clampMax: isInt16 ? INT16_MAX : INT32_MAX
+  };
+}
+
+function isIntegerExportStat(statName) {
+  return statName === 'DOY_Max' || statName === 'DOY_Min' || statName === 'GSL';
+}
+
+function isAlwaysInt32ExportVariable(varName) {
+  return varName.indexOf('LST') >= 0 ||
+    varName === 'ET' ||
+    varName === 'LAI' ||
+    varName.indexOf('TCT') >= 0 ||
+    varName.indexOf('Albedo') >= 0 ||
+    varName.indexOf('WSA') >= 0 ||
+    varName.indexOf('BSA') >= 0;
+}
+
+function isCatalogBoundedEVI(productKey, varName) {
+  return varName === 'EVI' && productKey === 'MOD13Q1 (250m, 16-day)';
+}
+
+function isFormulaEVI(varName) {
+  return varName === 'EVI';
+}
+
+function getCompactExportEncoding(productKey, varName, statName) {
+  if (isIntegerExportStat(statName)) {
+    return makeExportEncoding('int16', 1);
+  }
+
+  if (statName === 'Springness' || statName === 'Winterness') {
+    return makeExportEncoding('int16', 10000);
+  }
+
+  if (statName === 'CV' || statName === 'CumSum') {
+    return makeExportEncoding('int32', 10000);
+  }
+
+  if (isAlwaysInt32ExportVariable(varName)) {
+    return makeExportEncoding('int32', 10000);
+  }
+
+  // MOD13Q1 EVI is a catalog-scaled bounded product. Formula-derived EVI
+  // can have rare high outliers when denominators approach zero, so keep it
+  // in Int32 for compact mode rather than clipping those values to Int16.
+  if (isFormulaEVI(varName) && !isCatalogBoundedEVI(productKey, varName)) {
+    return makeExportEncoding('int32', 10000);
+  }
+
+  return makeExportEncoding('int16', 10000);
+}
+
+function getExportEncoding(productKey, varName, statName, exportOptions) {
+  if (exportOptions.mode === 'compact') {
+    return getCompactExportEncoding(productKey, varName, statName);
+  }
+
+  return {
+    type: 'float32',
+    factor: 1,
+    suffix: '',
+    clampMin: null,
+    clampMax: null
+  };
+}
+
+function prepareExportImage(image, exportEncoding) {
+  if (exportEncoding.type === 'float32') {
+    return image.toFloat();
+  }
+
+  var bandNames = image.bandNames();
+  var scaled = image.toFloat().multiply(exportEncoding.factor);
+  var clamped = scaled
+    .max(ee.Image.constant(exportEncoding.clampMin))
+    .min(ee.Image.constant(exportEncoding.clampMax));
+
+  if (exportEncoding.type === 'int16') {
+    return clamped.toInt16().rename(bandNames);
+  }
+
+  return clamped.toInt32().rename(bandNames);
+}
+
 // Create a single export task to Google Drive
-function createExportTask(image, description, aoi, crs, scale, folder, maxPixels) {
+function createExportTask(image, description, aoi, crs, scale, folder, maxPixels,
+                          productKey, varName, statName, exportOptions) {
+  var exportEncoding = getExportEncoding(productKey, varName, statName, exportOptions);
+  var exportDescription = description + exportEncoding.suffix;
   Export.image.toDrive({
-    image: image.clip(aoi).toFloat(),
-    description: description,
+    image: prepareExportImage(image, exportEncoding).clip(aoi),
+    description: exportDescription,
     folder: folder,
+    fileNamePrefix: exportDescription,
     region: aoi,
     crs: crs,
     scale: scale,
@@ -1139,12 +1244,18 @@ var crsInput    = ui.Textbox({value: 'EPSG:4326', style: {fontSize: '12px', stre
 var scaleInput  = ui.Textbox({value: '500',        style: {fontSize: '12px', stretch: 'horizontal'}});
 var folderInput = ui.Textbox({value: 'GEE_EFA',    style: {fontSize: '12px', stretch: 'horizontal'}});
 var maxPixInput = ui.Textbox({value: '1e9',         style: {fontSize: '12px', stretch: 'horizontal'}});
+var exportEncodingSelect = ui.Select({
+  items: [EXPORT_ENCODING_FLOAT, EXPORT_ENCODING_COMPACT],
+  value: EXPORT_ENCODING_FLOAT,
+  style: {stretch: 'horizontal', fontSize: '12px'}
+});
 
 var exportPanel = ui.Panel([
   makeRow('CRS:', crsInput),
   makeRow('Scale (m):', scaleInput),
   makeRow('Drive folder:', folderInput),
-  makeRow('Max pixels:', maxPixInput)
+  makeRow('Max pixels:', maxPixInput),
+  makeRow('Encoding:', exportEncodingSelect)
 ]);
 
 // ---- QA / Cloud Masking Toggle ----
@@ -1482,6 +1593,14 @@ function getGapFillOptions() {
   };
 }
 
+function getExportOptions() {
+  var encoding = exportEncodingSelect.getValue() || EXPORT_ENCODING_FLOAT;
+  return {
+    mode: encoding === EXPORT_ENCODING_COMPACT ? 'compact' : 'float',
+    label: encoding
+  };
+}
+
 // --- Calculate Button Handler ---
 calcButton.onClick(function() {
   statusLabel.style().set('color', '#333');
@@ -1540,6 +1659,7 @@ calcButton.onClick(function() {
   var scale = parseInt(scaleInput.getValue(), 10) || PRODUCTS[productKey].resolution;
   var folder = folderInput.getValue().trim() || 'GEE_EFA';
   var maxPx = parseFloat(maxPixInput.getValue()) || 1e9;
+  var exportOptions = getExportOptions();
 
   // Task count
   var taskCount = selectedYears.length * selectedVars.length * selectedStats.length;
@@ -1552,6 +1672,9 @@ calcButton.onClick(function() {
   if (gapFillOptions.enabled) {
     prepMsg += '\nTemporal gap fill: ' + gapFillOptions.method +
       ', window ' + gapFillOptions.window;
+  }
+  if (exportOptions.mode === 'compact') {
+    prepMsg += '\nCompact integer export enabled. Filenames include integer type and divisor.';
   }
   if (taskCount > 50) {
     prepMsg += '\n(NOTE: High task count - consider reducing selections)';
@@ -1593,7 +1716,8 @@ calcButton.onClick(function() {
         if (result) {
           var desc = productShort + '_' + varName + '_' + statName + '_' + year +
             gapFillOptions.suffix;
-          createExportTask(result, desc, aoi, crs, scale, folder, maxPx);
+          createExportTask(result, desc, aoi, crs, scale, folder, maxPx,
+            productKey, varName, statName, exportOptions);
           exportCount++;
 
           if (!firstImage) {
@@ -1623,11 +1747,19 @@ calcButton.onClick(function() {
   }
 
   statusLabel.style().set('color', '#27ae60');
+  var exportPattern = productShort + '_{Variable}_{Statistic}_{Year}' +
+    gapFillOptions.suffix;
+  if (exportOptions.mode === 'compact') {
+    exportPattern += '_{i16x10000|i32x10000|i16x1}';
+  }
+  var compactMsg = exportOptions.mode === 'compact'
+    ? '\nCompact integer export enabled. Divide pixel values by the x factor in the filename.'
+    : '';
   statusLabel.setValue(
     'Done! Created ' + exportCount + ' export task(s) for ' + yearRange + '.\n' +
     'Go to the Tasks tab (top right) to start them.\n' +
-    'Each task: ' + productShort + '_{Variable}_{Statistic}_{Year}' +
-    gapFillOptions.suffix
+    'Each task: ' + exportPattern +
+    compactMsg
   );
 });
 
