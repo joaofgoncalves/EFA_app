@@ -3,7 +3,7 @@
  * EFA Calculator - MODIS Annual Statistics
  * ============================================================================
  *
- * Computes Ecosystem Functional Attributes (EFAs) from MODIS time series.
+ * Computes Ecosystem Functional Attributes (EFAs) from MODIS & Landsat time series.
  * EFAs characterize ecosystem functioning through:
  *   - Magnitude: annual mean/median (productivity proxy)
  *   - Seasonality: CV, StdDev, IQR (variation intensity)
@@ -18,7 +18,7 @@
  *   Schaaf et al. (2002) - BRDF/Albedo model
  *   Lobser & Cohen (2007) - MODIS Tasseled Cap coefficients
  *
- * Version: v0.1 (2026-04-15)
+ * Version: v0.2 (2026-04-15)
  * ============================================================================
  */
 
@@ -144,6 +144,174 @@ function sprg(doyImage) {
 function wint(doyImage) {
   return doyImage.toFloat().multiply(2).multiply(Math.PI).divide(365).cos();
 }
+
+
+// ============================================================================
+// SECTION 1B: LANDSAT HARMONIZED PIPELINE
+// ============================================================================
+// Supports: Landsat 5 (TM), 7 (ETM+), 8 (OLI) — Collection 2, Tier 1, Level 2
+// All bands renamed to Blue/Green/Red/NIR/SWIR1/SWIR2/LST_K before any computation.
+// ETM+/TM optical bands are cross-calibrated to OLI equivalents via Roy et al. (2016)
+// coefficients before reflectance indices are computed.
+// TCT uses mission-specific coefficients and is applied BEFORE harmonization.
+// ============================================================================
+
+// ---- Scaling factors (C02 L2) ----
+function applyLandsatScaleFactors(image) {
+  var opt = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thm = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+  return image.addBands(opt, null, true).addBands(thm, null, true);
+}
+
+// ---- Band renaming ----
+function renameLT8(img) {
+  return img.select(
+    ['SR_B2','SR_B3','SR_B4','SR_B5','SR_B6','SR_B7','ST_B10','QA_PIXEL'],
+    ['Blue', 'Green','Red', 'NIR', 'SWIR1','SWIR2','LST_K', 'pixel_qa']);
+}
+function renameLT57(img) {
+  return img.select(
+    ['SR_B1','SR_B2','SR_B3','SR_B4','SR_B5','SR_B7','ST_B6','QA_PIXEL'],
+    ['Blue', 'Green','Red', 'NIR', 'SWIR1','SWIR2','LST_K','pixel_qa']);
+}
+
+// ---- Cloud / shadow mask using QA_PIXEL (C02) ----
+function fmaskLandsat(img) {
+  var qa = img.select('pixel_qa');
+  return img.updateMask(
+    qa.bitwiseAnd(1 << 3).eq(0).and(qa.bitwiseAnd(1 << 5).eq(0))
+  );
+}
+
+// ---- ETM+ / TM → OLI spectral harmonization (Roy et al. 2016) ----
+var LT_HARM_SLOPES = ee.Image.constant([0.8474, 0.8483, 0.9047, 0.8462, 0.8937, 0.9071]);
+var LT_HARM_ITCPS  = ee.Image.constant([0.0003, 0.0088, 0.0061, 0.0412, 0.0254, 0.0172]);
+function etmToOli(img) {
+  var sr = img.select(['Blue','Green','Red','NIR','SWIR1','SWIR2'])
+    .multiply(LT_HARM_SLOPES).add(LT_HARM_ITCPS);
+  return sr.addBands(img.select(['LST_K','pixel_qa']));
+}
+
+// ---- Reflectance-based spectral indices (harmonized bands) ----
+function LT_NDVI(img) {
+  return img.normalizedDifference(['NIR','Red']).rename('NDVI')
+    .set('system:time_start', img.get('system:time_start'));
+}
+function LT_EVI(img) {
+  return img.expression(
+    '2.5 * (NIR - RED) / (NIR + 6.0*RED - 7.5*BLUE + 1.0)', {
+      NIR: img.select('NIR').toFloat(),
+      RED: img.select('Red').toFloat(),
+      BLUE: img.select('Blue').toFloat()
+    }).rename('EVI').set('system:time_start', img.get('system:time_start'));
+}
+function LT_SAVI(img) {
+  return img.expression(
+    '1.5 * (NIR - RED) / (NIR + RED + 0.5)', {
+      NIR: img.select('NIR').toFloat(),
+      RED: img.select('Red').toFloat()
+    }).rename('SAVI').set('system:time_start', img.get('system:time_start'));
+}
+function LT_NBR(img) {
+  return img.normalizedDifference(['NIR','SWIR2']).rename('NBR')
+    .set('system:time_start', img.get('system:time_start'));
+}
+function LT_NDWI(img) {
+  return img.normalizedDifference(['NIR','SWIR1']).rename('NDWI')
+    .set('system:time_start', img.get('system:time_start'));
+}
+function LT_LST(img) {
+  return img.select('LST_K').subtract(273.15).rename('LST')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// Lookup table for reflectance index functions
+var LT_INDEX_FNS = {
+  'NDVI': LT_NDVI,
+  'EVI':  LT_EVI,
+  'SAVI': LT_SAVI,
+  'NBR':  LT_NBR,
+  'NDWI': LT_NDWI
+};
+
+// ---- Tasseled Cap Transforms — mission-specific coefficients ----
+// Applied to renamed (unharmonized) bands. Must run BEFORE etmToOli.
+
+// LT5 (Crist 1985)
+function LT5_TCT_B(img) {
+  return img.expression(
+    '(B*0.2043)+(G*0.4158)+(R*0.5524)+(N*0.5741)+(S1*0.3124)+(S2*0.2303)',
+    {B:img.select('Blue'),G:img.select('Green'),R:img.select('Red'),
+     N:img.select('NIR'),S1:img.select('SWIR1'),S2:img.select('SWIR2')})
+    .rename('TCTB').set('system:time_start', img.get('system:time_start'));
+}
+function LT5_TCT_G(img) {
+  return img.expression(
+    '(B*-0.1603)+(G*-0.2819)+(R*-0.4934)+(N*0.7940)+(S1*-0.0002)+(S2*-0.1446)',
+    {B:img.select('Blue'),G:img.select('Green'),R:img.select('Red'),
+     N:img.select('NIR'),S1:img.select('SWIR1'),S2:img.select('SWIR2')})
+    .rename('TCTG').set('system:time_start', img.get('system:time_start'));
+}
+function LT5_TCT_W(img) {
+  return img.expression(
+    '(B*0.0315)+(G*0.2021)+(R*0.3102)+(N*0.1594)+(S1*-0.6806)+(S2*-0.6109)',
+    {B:img.select('Blue'),G:img.select('Green'),R:img.select('Red'),
+     N:img.select('NIR'),S1:img.select('SWIR1'),S2:img.select('SWIR2')})
+    .rename('TCTW').set('system:time_start', img.get('system:time_start'));
+}
+
+// LT7 (Huang et al. 2002)
+function LT7_TCT_B(img) {
+  return img.expression(
+    '(B*0.3561)+(G*0.3972)+(R*0.3904)+(N*0.6966)+(S1*0.2286)+(S2*0.1596)',
+    {B:img.select('Blue'),G:img.select('Green'),R:img.select('Red'),
+     N:img.select('NIR'),S1:img.select('SWIR1'),S2:img.select('SWIR2')})
+    .rename('TCTB').set('system:time_start', img.get('system:time_start'));
+}
+function LT7_TCT_G(img) {
+  return img.expression(
+    '(B*-0.3344)+(G*-0.3544)+(R*-0.4556)+(N*0.6966)+(S1*-0.0242)+(S2*-0.2630)',
+    {B:img.select('Blue'),G:img.select('Green'),R:img.select('Red'),
+     N:img.select('NIR'),S1:img.select('SWIR1'),S2:img.select('SWIR2')})
+    .rename('TCTG').set('system:time_start', img.get('system:time_start'));
+}
+function LT7_TCT_W(img) {
+  return img.expression(
+    '(B*0.2626)+(G*0.2141)+(R*0.0926)+(N*0.0656)+(S1*-0.7629)+(S2*-0.5388)',
+    {B:img.select('Blue'),G:img.select('Green'),R:img.select('Red'),
+     N:img.select('NIR'),S1:img.select('SWIR1'),S2:img.select('SWIR2')})
+    .rename('TCTW').set('system:time_start', img.get('system:time_start'));
+}
+
+// LT8 (Baig et al. 2014)
+function LT8_TCT_B(img) {
+  return img.expression(
+    '(B*0.3029)+(G*0.2786)+(R*0.4733)+(N*0.5599)+(S1*0.508)+(S2*0.1872)',
+    {B:img.select('Blue'),G:img.select('Green'),R:img.select('Red'),
+     N:img.select('NIR'),S1:img.select('SWIR1'),S2:img.select('SWIR2')})
+    .rename('TCTB').set('system:time_start', img.get('system:time_start'));
+}
+function LT8_TCT_G(img) {
+  return img.expression(
+    '(B*-0.2941)+(G*-0.2430)+(R*-0.5424)+(N*0.7276)+(S1*0.0713)+(S2*-0.1608)',
+    {B:img.select('Blue'),G:img.select('Green'),R:img.select('Red'),
+     N:img.select('NIR'),S1:img.select('SWIR1'),S2:img.select('SWIR2')})
+    .rename('TCTG').set('system:time_start', img.get('system:time_start'));
+}
+function LT8_TCT_W(img) {
+  return img.expression(
+    '(B*0.1511)+(G*0.1973)+(R*0.3283)+(N*0.3407)+(S1*-0.7117)+(S2*-0.4559)',
+    {B:img.select('Blue'),G:img.select('Green'),R:img.select('Red'),
+     N:img.select('NIR'),S1:img.select('SWIR1'),S2:img.select('SWIR2')})
+    .rename('TCTW').set('system:time_start', img.get('system:time_start'));
+}
+
+// Lookup table: variable name → per-mission TCT functions
+var LT_TCT_FNS = {
+  'TCT_Brightness': {lt5: LT5_TCT_B, lt7: LT7_TCT_B, lt8: LT8_TCT_B},
+  'TCT_Greenness':  {lt5: LT5_TCT_G, lt7: LT7_TCT_G, lt8: LT8_TCT_G},
+  'TCT_Wetness':    {lt5: LT5_TCT_W, lt7: LT7_TCT_W, lt8: LT8_TCT_W}
+};
 
 
 // ============================================================================
@@ -428,6 +596,28 @@ var PRODUCTS = {
       'LAI':  {band: 'Lai',  scale: 0.1},
       'FPAR': {band: 'Fpar', scale: 0.01}
     }
+  },
+
+  // ---- Landsat Harmonized (LT5 + LT7 + LT8, C02 T1 L2, 30m) ----
+  // Collection loading is handled by a dedicated branch in loadAndProcessCollection.
+  // fmask cloud masking is always applied; etmToOli harmonization applied for
+  // reflectance indices; TCT uses mission-specific coefficients (no harmonization).
+  'Landsat Harmonized (30m, LT5/7/8)': {
+    type: 'landsat',
+    resolution: 30,
+    temporal: '16-day',   // nominal revisit; used for gap-fill buffer calculation
+    qaMask: null,         // fmask is applied inside the Landsat pipeline builder
+    variables: {
+      'NDVI':           {band: 'NDVI'},
+      'EVI':            {band: 'EVI'},
+      'SAVI':           {band: 'SAVI'},
+      'NBR':            {band: 'NBR'},
+      'NDWI':           {band: 'NDWI'},
+      'TCT_Brightness': {band: 'TCTB'},
+      'TCT_Greenness':  {band: 'TCTG'},
+      'TCT_Wetness':    {band: 'TCTW'},
+      'LST':            {band: 'LST'}
+    }
   }
 };
 
@@ -580,7 +770,8 @@ function gapFillTemporalReducer(imgCol, windowSize, method) {
     .sort('system:time_start');
 }
 
-// Load, filter, mask, and process a MODIS collection for one variable and year
+// Load, filter, mask, and process a collection for one variable and year.
+// Handles both MODIS (single-collection) and Landsat Harmonized (multi-mission merge).
 function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions) {
   var product = PRODUCTS[productKey];
   var varConfig = product.variables[varName];
@@ -597,6 +788,81 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     loadEndDate = endDate.advance(bufferDays, 'day');
   }
 
+  // ---- Landsat Harmonized branch ----
+  if (product.type === 'landsat') {
+    var ltFilter = ee.Filter.and(
+      ee.Filter.bounds(aoi),
+      ee.Filter.date(loadStartDate, loadEndDate)
+    );
+    var lt8raw = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2').filter(ltFilter);
+    var lt7raw = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2').filter(ltFilter);
+    var lt5raw = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2').filter(ltFilter);
+
+    var col;
+
+    if (varName === 'LST') {
+      // LST: extract thermal band, scale to Kelvin, subtract 273.15 → Celsius
+      var mkLST = function(renameFn) {
+        return function(img) {
+          var orig = img;
+          img = applyLandsatScaleFactors(img);
+          img = renameFn(img);
+          img = fmaskLandsat(img);
+          return ee.Image(LT_LST(img).copyProperties(orig, orig.propertyNames()));
+        };
+      };
+      col = lt8raw.map(mkLST(renameLT8))
+        .merge(lt7raw.map(mkLST(renameLT57)))
+        .merge(lt5raw.map(mkLST(renameLT57)));
+
+    } else if (varName === 'TCT_Brightness' || varName === 'TCT_Greenness' ||
+               varName === 'TCT_Wetness') {
+      // TCT: mission-specific coefficients applied BEFORE cross-sensor harmonization
+      var tctFnMap = LT_TCT_FNS[varName];
+      var mkTCT = function(renameFn, tctFn) {
+        return function(img) {
+          var orig = img;
+          img = applyLandsatScaleFactors(img);
+          img = renameFn(img);
+          img = fmaskLandsat(img);
+          return ee.Image(tctFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
+        };
+      };
+      col = lt8raw.map(mkTCT(renameLT8,  tctFnMap.lt8))
+        .merge(lt7raw.map(mkTCT(renameLT57, tctFnMap.lt7)))
+        .merge(lt5raw.map(mkTCT(renameLT57, tctFnMap.lt5)));
+
+    } else {
+      // Reflectance indices: harmonize ETM+/TM to OLI space first, then compute index
+      var idxFn = LT_INDEX_FNS[varName];
+      var mkIdx8 = function(img) {
+        var orig = img;
+        img = applyLandsatScaleFactors(img);
+        img = renameLT8(img);
+        img = fmaskLandsat(img);
+        return ee.Image(idxFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
+      };
+      var mkIdx57 = function(img) {
+        var orig = img;
+        img = applyLandsatScaleFactors(img);
+        img = renameLT57(img);
+        img = fmaskLandsat(img);
+        img = ee.Image(etmToOli(img).copyProperties(orig, orig.propertyNames()));
+        return ee.Image(idxFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
+      };
+      col = lt8raw.map(mkIdx8)
+        .merge(lt7raw.map(mkIdx57))
+        .merge(lt5raw.map(mkIdx57));
+    }
+
+    col = col.sort('system:time_start');
+    if (gapFillOptions.enabled) {
+      col = gapFillTemporalReducer(col, gapFillOptions.window, gapFillOptions.method);
+    }
+    return col.filterDate(startDate, endDate).sort('system:time_start');
+  }
+
+  // ---- MODIS branch (original pipeline) ----
   var col = ee.ImageCollection(product.geeId)
     .filterDate(loadStartDate, loadEndDate)
     .filterBounds(aoi);
@@ -663,7 +929,12 @@ function getDefaultVisParams(varName, statName) {
       varName === 'SAVI' || varName === 'MSAVI') {
     return {min: -0.2, max: 0.9, palette: ['brown', 'yellow', 'green', 'darkgreen']};
   }
+  if (varName === 'LST') {
+    // Landsat LST is in Celsius after K→°C conversion
+    return {min: -10, max: 50, palette: ['blue', 'cyan', 'yellow', 'orange', 'red']};
+  }
   if (varName.indexOf('LST') >= 0) {
+    // MODIS LST is in Kelvin (scale 0.02 applied)
     return {min: 270, max: 330, palette: ['blue', 'cyan', 'yellow', 'orange', 'red']};
   }
   if (varName.indexOf('Albedo') >= 0 || varName.indexOf('WSA') >= 0 ||
@@ -682,8 +953,10 @@ function getDefaultVisParams(varName, statName) {
   if (varName === 'FPAR') {
     return {min: 0, max: 1, palette: ['white', 'green', 'darkgreen']};
   }
-  if (varName.indexOf('TCT') >= 0 || varName.indexOf('brightness') >= 0 ||
-      varName.indexOf('greenness') >= 0 || varName.indexOf('wetness') >= 0) {
+  if (varName.indexOf('TCT') >= 0 || varName === 'TCT_Brightness' ||
+      varName === 'TCT_Greenness' || varName === 'TCT_Wetness' ||
+      varName.indexOf('brightness') >= 0 || varName.indexOf('greenness') >= 0 ||
+      varName.indexOf('wetness') >= 0) {
     return {min: -0.1, max: 0.5, palette: ['brown', 'yellow', 'green']};
   }
   if (varName === 'NBR' || varName === 'NDWI') {
@@ -720,7 +993,7 @@ var S = {
 // --- Title ---
 var titleLabel = ui.Label('EFA Calculator', S.title);
 var subtitleLabel = ui.Label(
-  'Ecosystem Functional Attributes from MODIS Annual Time Series', S.subtitle);
+  'Ecosystem Functional Attributes from MODIS & Landsat Annual Time Series', S.subtitle);
 
 // ---- 1. AOI Section ----
 var aoiHeader = ui.Label('1. Area of Interest', S.section);
@@ -751,7 +1024,7 @@ var loadAssetBtn = ui.Button({
 var aoiStatus = ui.Label('Draw an AOI on the map to begin.', {fontSize: '11px', color: '#7f8c8d'});
 
 // ---- 2. Product Section ----
-var productHeader = ui.Label('2. MODIS Product', S.section);
+var productHeader = ui.Label('2. Satellite Product', S.section);
 var productSelect = ui.Select({
   items: Object.keys(PRODUCTS),
   placeholder: 'Select a product...',
@@ -768,8 +1041,8 @@ var yearCol2 = ui.Panel({layout: ui.Panel.Layout.flow('vertical'), style: yearCo
 var yearCol3 = ui.Panel({layout: ui.Panel.Layout.flow('vertical'), style: yearColStyle});
 var yearCols = [yearCol1, yearCol2, yearCol3];
 var yearList = [];
-for (var y = 2000; y <= 2026; y++) yearList.push(y);
-var yearPerCol = Math.ceil(yearList.length / 3);  // 9, 9, 8
+for (var y = 1984; y <= 2026; y++) yearList.push(y);
+var yearPerCol = Math.ceil(yearList.length / 3);
 for (var yi = 0; yi < yearList.length; yi++) {
   var ycb = ui.Checkbox({label: String(yearList[yi]), value: false, style: yearCbStyle});
   yearCheckboxes[String(yearList[yi])] = ycb;
@@ -786,6 +1059,12 @@ var yearButtons = ui.Panel({
       var keys = Object.keys(yearCheckboxes);
       for (var i = 0; i < keys.length; i++) yearCheckboxes[keys[i]].setValue(true);
     }}),
+
+    ui.Button({label: 'Select MODIS range', style: S.smallBtn, onClick: function() {
+      var keys = Object.keys(yearCheckboxes);
+      for (var i = 16; i < keys.length; i++) yearCheckboxes[keys[i]].setValue(true);
+    }}),
+
     ui.Button({label: 'Clear All', style: S.smallBtn, onClick: function() {
       var keys = Object.keys(yearCheckboxes);
       for (var i = 0; i < keys.length; i++) yearCheckboxes[keys[i]].setValue(false);
@@ -875,8 +1154,9 @@ var qaMaskCheckbox = ui.Checkbox({
   style: {fontSize: '12px', margin: '6px 0 0 0'}
 });
 var qaMaskInfo = ui.Label(
-  'Removes clouds, cloud shadows, cirrus, and low-quality observations ' +
-  'using each product\'s QA/QC band(s). Recommended for science-grade outputs.',
+  'For MODIS: removes clouds, cloud shadows, cirrus, and low-quality ' +
+  'observations using each product\'s QA/QC band(s).\n' +
+  'For Landsat Harmonized: fmask (cloud + cloud shadow) is always applied.',
   {fontSize: '10px', color: '#7f8c8d', margin: '1px 0 4px 12px', whiteSpace: 'pre-wrap'}
 );
 
@@ -936,8 +1216,14 @@ var infoContent = ui.Label(
   '  Dispersion: StdDev, IQR(P95-P05) - interquantile range, MAD - Median Absolute Deviation, CV(StdDev/Mean) - Coefficient of Variation\n' +
   '  Phenology: DOY_Max, DOY_Min, Springness, Winterness, GSL\n' +
   '  Integration: CumSum (annual sum), Amplitude (Max-Min)\n\n' +
+  'Landsat Harmonized product:\n' +
+  '  LT5 (1984–2013) + LT7 (1999–) + LT8 (2013–), C02 T1 L2.\n' +
+  '  Reflectance indices (NDVI, EVI, SAVI, NBR, NDWI) use ETM+/TM→OLI\n' +
+  '  cross-calibration (Roy et al. 2016). TCT uses mission-specific\n' +
+  '  coefficients: LT5 Crist (1985), LT7 Huang et al. (2002),\n' +
+  '  LT8 Baig et al. (2014). LST in Celsius from C02 ST_B bands.\n\n' +
   'References: Alcaraz-Segura et al. (2006), Paruelo et al. (2001),\n' +
-  'Schaaf et al. (2002), Lobser & Cohen (2007)',
+  'Schaaf et al. (2002), Lobser & Cohen (2007), Roy et al. (2016)',
   {fontSize: '10px', color: '#555', shown: false, whiteSpace: 'pre-wrap'}
 );
 
@@ -1122,11 +1408,19 @@ productSelect.onChange(function(productKey) {
     }
   }
 
-  var infoText = product.resolution + 'm | ' + product.temporal +
-    ' | ' + varNames.length + ' variable(s)' +
-    ' | QA mask: ' + (hasQA ? 'available' : 'n/a');
-  if (product.temporal === 'Daily') {
-    infoText += '\n  Note: Daily product - computation may be slower.';
+  var infoText;
+  if (product.type === 'landsat') {
+    infoText = product.resolution + 'm | scenes | ' + varNames.length + ' variable(s)' +
+      ' | fmask cloud masking always applied\n' +
+      '  LT5: 1984–2013 · LT7: 1999–present · LT8: 2013–present\n' +
+      '  TCT uses mission-specific coefficients; reflectance indices harmonized to OLI.';
+  } else {
+    infoText = product.resolution + 'm | ' + product.temporal +
+      ' | ' + varNames.length + ' variable(s)' +
+      ' | QA mask: ' + (hasQA ? 'available' : 'n/a');
+    if (product.temporal === 'Daily') {
+      infoText += '\n  Note: Daily product - computation may be slower.';
+    }
   }
   productInfo.setValue(infoText);
 });
@@ -1152,7 +1446,7 @@ function getSelectedStatistics() {
 
 function getSelectedYears() {
   var sel = [];
-  for (var y = 2000; y <= 2026; y++) {
+  for (var y = 1984; y <= 2026; y++) {
     if (yearCheckboxes[String(y)].getValue()) sel.push(y);
   }
   return sel;
