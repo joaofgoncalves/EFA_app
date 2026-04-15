@@ -18,7 +18,7 @@
  *   Schaaf et al. (2002) - BRDF/Albedo model
  *   Lobser & Cohen (2007) - MODIS Tasseled Cap coefficients
  *
- * Version: 1.0
+ * Version: v0.1 (2026-04-15)
  * ============================================================================
  */
 
@@ -700,6 +700,7 @@ function getDefaultVisParams(varName, statName) {
 // --- State ---
 var variableCheckboxes = {};
 var statisticCheckboxes = {};
+var yearCheckboxes = {};
 var currentAssetAOI = null;
 var applyQAMask = true;  // Enable science-grade QA / cloud masking by default
 var applyGapFill = false; // Optional temporal interpolation of masked pixels
@@ -758,14 +759,39 @@ var productSelect = ui.Select({
 });
 var productInfo = ui.Label('', {fontSize: '11px', color: '#7f8c8d'});
 
-// ---- 3. Year Section ----
-var yearHeader = ui.Label('3. Year', S.section);
-var yearItems = [];
-for (var y = 2001; y <= 2025; y++) { yearItems.push(String(y)); }
-var yearSelect = ui.Select({
-  items: yearItems,
-  value: '2020',
-  style: {stretch: 'horizontal', fontSize: '12px'}
+// ---- 3. Year(s) Section ----
+var yearHeader = ui.Label('3. Year(s)', S.section);
+var yearCbStyle = {fontSize: '12px', margin: '1px 0 1px 0'};
+var yearColStyle = {margin: '0 12px 0 4px'};
+var yearCol1 = ui.Panel({layout: ui.Panel.Layout.flow('vertical'), style: yearColStyle});
+var yearCol2 = ui.Panel({layout: ui.Panel.Layout.flow('vertical'), style: yearColStyle});
+var yearCol3 = ui.Panel({layout: ui.Panel.Layout.flow('vertical'), style: yearColStyle});
+var yearCols = [yearCol1, yearCol2, yearCol3];
+var yearList = [];
+for (var y = 2000; y <= 2026; y++) yearList.push(y);
+var yearPerCol = Math.ceil(yearList.length / 3);  // 9, 9, 8
+for (var yi = 0; yi < yearList.length; yi++) {
+  var ycb = ui.Checkbox({label: String(yearList[yi]), value: false, style: yearCbStyle});
+  yearCheckboxes[String(yearList[yi])] = ycb;
+  yearCols[Math.floor(yi / yearPerCol)].add(ycb);
+}
+var yearPanel = ui.Panel({
+  widgets: [yearCol1, yearCol2, yearCol3],
+  layout: ui.Panel.Layout.flow('horizontal'),
+  style: {margin: '0 0 0 0'}
+});
+var yearButtons = ui.Panel({
+  widgets: [
+    ui.Button({label: 'Select All', style: S.smallBtn, onClick: function() {
+      var keys = Object.keys(yearCheckboxes);
+      for (var i = 0; i < keys.length; i++) yearCheckboxes[keys[i]].setValue(true);
+    }}),
+    ui.Button({label: 'Clear All', style: S.smallBtn, onClick: function() {
+      var keys = Object.keys(yearCheckboxes);
+      for (var i = 0; i < keys.length; i++) yearCheckboxes[keys[i]].setValue(false);
+    }})
+  ],
+  layout: ui.Panel.Layout.flow('horizontal')
 });
 
 // ---- 4. Variables Section ----
@@ -933,7 +959,7 @@ var mainPanel = ui.Panel({
     aoiHeader, aoiMethodSelect, aoiDrawPanel, assetPathInput, loadAssetBtn, aoiStatus,
     ui.Panel({style: S.sep}),
     productHeader, productSelect, productInfo,
-    yearHeader, yearSelect,
+    yearHeader, yearPanel, yearButtons,
     ui.Panel({style: S.sep}),
     varsHeader, varsPanel, varsButtons,
     statsHeader, statsPanel, statsButtons,
@@ -1124,6 +1150,14 @@ function getSelectedStatistics() {
   return sel;
 }
 
+function getSelectedYears() {
+  var sel = [];
+  for (var y = 2000; y <= 2026; y++) {
+    if (yearCheckboxes[String(y)].getValue()) sel.push(y);
+  }
+  return sel;
+}
+
 function getGapFillOptions() {
   applyGapFill = gapFillCheckbox.getValue();
 
@@ -1167,11 +1201,11 @@ calcButton.onClick(function() {
     return;
   }
 
-  // Validate year
-  var year = parseInt(yearSelect.getValue(), 10);
-  if (!year || year < 2000 || year > 2025) {
+  // Validate years
+  var selectedYears = getSelectedYears();
+  if (selectedYears.length === 0) {
     statusLabel.style().set('color', 'red');
-    statusLabel.setValue('ERROR: Select a valid year.');
+    statusLabel.setValue('ERROR: Select at least one year.');
     return;
   }
 
@@ -1214,9 +1248,13 @@ calcButton.onClick(function() {
   var maxPx = parseFloat(maxPixInput.getValue()) || 1e9;
 
   // Task count
-  var taskCount = selectedVars.length * selectedStats.length;
+  var taskCount = selectedYears.length * selectedVars.length * selectedStats.length;
   statusLabel.style().set('color', '#333');
-  var prepMsg = 'Preparing ' + taskCount + ' export task(s)...';
+  var yearRange = selectedYears.length === 1
+    ? String(selectedYears[0])
+    : selectedYears[0] + '–' + selectedYears[selectedYears.length - 1] +
+      ' (' + selectedYears.length + ' years)';
+  var prepMsg = 'Preparing ' + taskCount + ' export task(s) for ' + yearRange + '...';
   if (gapFillOptions.enabled) {
     prepMsg += '\nTemporal gap fill: ' + gapFillOptions.method +
       ', window ' + gapFillOptions.window;
@@ -1237,33 +1275,39 @@ calcButton.onClick(function() {
   var firstImage = null;
   var firstVarName = '';
   var firstStatName = '';
+  var firstYear = selectedYears[0];
   var exportCount = 0;
 
-  // Process each variable x statistic combination
-  for (var v = 0; v < selectedVars.length; v++) {
-    var varName = selectedVars[v];
-    var imgCol = loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions);
+  // Process each year x variable x statistic combination
+  for (var yr = 0; yr < selectedYears.length; yr++) {
+    var year = selectedYears[yr];
 
-    // Pre-compute DOY_Max if needed (cached per variable)
-    var doyMaxImage = null;
-    if (needsDoyMax) {
-      doyMaxImage = viTSdateOfMax(imgCol);
-    }
+    for (var v = 0; v < selectedVars.length; v++) {
+      var varName = selectedVars[v];
+      var imgCol = loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions);
 
-    for (var s = 0; s < selectedStats.length; s++) {
-      var statName = selectedStats[s];
-      var result = computeStatistic(imgCol, statName, doyMaxImage);
+      // Pre-compute DOY_Max if needed (cached per variable × year)
+      var doyMaxImage = null;
+      if (needsDoyMax) {
+        doyMaxImage = viTSdateOfMax(imgCol);
+      }
 
-      if (result) {
-        var desc = productShort + '_' + varName + '_' + statName + '_' + year +
-          gapFillOptions.suffix;
-        createExportTask(result, desc, aoi, crs, scale, folder, maxPx);
-        exportCount++;
+      for (var s = 0; s < selectedStats.length; s++) {
+        var statName = selectedStats[s];
+        var result = computeStatistic(imgCol, statName, doyMaxImage);
 
-        if (!firstImage) {
-          firstImage = result;
-          firstVarName = varName;
-          firstStatName = statName;
+        if (result) {
+          var desc = productShort + '_' + varName + '_' + statName + '_' + year +
+            gapFillOptions.suffix;
+          createExportTask(result, desc, aoi, crs, scale, folder, maxPx);
+          exportCount++;
+
+          if (!firstImage) {
+            firstImage = result;
+            firstVarName = varName;
+            firstStatName = statName;
+            firstYear = year;
+          }
         }
       }
     }
@@ -1279,16 +1323,16 @@ calcButton.onClick(function() {
       }
     }
     var visParams = getDefaultVisParams(firstVarName, firstStatName);
-    var previewName = firstVarName + ' ' + firstStatName + ' ' + year + ' (preview)';
+    var previewName = firstVarName + ' ' + firstStatName + ' ' + firstYear + ' (preview)';
     Map.addLayer(firstImage.clip(aoi), visParams, previewName);
     Map.centerObject(aoi);
   }
 
   statusLabel.style().set('color', '#27ae60');
   statusLabel.setValue(
-    'Done! Created ' + exportCount + ' export task(s).\n' +
+    'Done! Created ' + exportCount + ' export task(s) for ' + yearRange + '.\n' +
     'Go to the Tasks tab (top right) to start them.\n' +
-    'Each task: ' + productShort + '_{Variable}_{Statistic}_' + year +
+    'Each task: ' + productShort + '_{Variable}_{Statistic}_{Year}' +
     gapFillOptions.suffix
   );
 });
