@@ -10,7 +10,8 @@
  *   - Phenology: DOY of peak activity with circular transforms
  *
  * Supports 10 MODIS products, 20+ spectral/biophysical variables,
- * and 17 annual statistics across 4 categories.
+ * and 17 annual statistics across 4 categories. Includes a Landsat harmonized pipeline 
+ * for reflectance indices and Tasseled Cap.
  *
  * References:
  *   Alcaraz-Segura et al. (2006) - EFA framework
