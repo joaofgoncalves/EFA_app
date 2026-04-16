@@ -4,7 +4,7 @@
 
 The app is designed for two main use cases:
 
-- Run ready-made EFA calculations from supported MODIS/MCD and Landsat products.
+- Run ready-made EFA calculations from supported MODIS/MCD, Landsat, Sentinel-2, and Sentinel-1 SAR products.
 - Extend the script with your own variables, indices, statistics, or products by editing the central registries in the app.
 
 There is no build system. Paste or open `EFA_Calculator_App.js` in the Earth Engine Code Editor, click **Run**, configure the side panel, then start the generated export tasks from the Earth Engine **Tasks** tab.
@@ -55,6 +55,7 @@ Large year ranges, daily products, large AOIs, Landsat exports, or many variable
 | Satellite Product | None | Product registry entry to use. Selecting a product rebuilds the variable list and updates the default scale. |
 | Year(s) | None | Years from 1984 through 2026 are available in the UI. Data availability still depends on each satellite product. |
 | Select MODIS range | 2000-2026 | Convenience button that checks the MODIS-era years in the current UI. |
+| Select Sentinel-1 range | 2015-2026 | Convenience button that checks years 2015 onward. Sentinel-1A data starts 2014-10-03; selecting from 2015 ensures complete calendar-year coverage. |
 | Variables / Dimensions | None | Single-band variables calculated from the selected product. |
 | Annual Statistics | None | Annual aggregation functions applied to each variable-year collection. |
 | CRS | `EPSG:4326` | Export projection. Change if you need a projected CRS for distance/area consistency. |
@@ -86,7 +87,7 @@ Then click **Load Asset**. The app uses `ee.FeatureCollection(path).geometry()` 
 
 ## Available products
 
-The app currently exposes 12 product choices: 9 MODIS/MCD products, 1 harmonized Landsat product, and 1 Sentinel-2 SR product. MODIS/MCD products use the regular single-collection pipeline. Landsat and Sentinel-2 each use dedicated pipelines with sensor-specific band renaming, cloud masking, and Tasseled Cap coefficients.
+The app currently exposes 13 product choices: 9 MODIS/MCD products, 1 harmonized Landsat product, 1 Sentinel-2 SR product, and 1 Sentinel-1 SAR product (experimental). MODIS/MCD products use the regular single-collection pipeline. Landsat, Sentinel-2, and Sentinel-1 each use dedicated pipelines.
 
 ### MODIS and MCD products
 
@@ -200,6 +201,59 @@ The export scale is set automatically per variable. The Scale field in the UI sh
 
 For Sentinel-2, the **Apply QA / Cloud Mask** checkbox does not disable SCL masking. Cloud, cloud shadow, and cirrus masking are always applied inside the Sentinel-2 pipeline.
 
+### Sentinel-1 SAR product
+
+> **Experimental.** SAR-derived EFAs capture radar backscatter dynamics and structural vegetation indices. They are complementary to optical EFAs and especially valuable in persistently cloud-covered regions or for tracking canopy structure and moisture dynamics.
+
+| Product in UI | Earth Engine collection | Resolution | Cadence | Exposed variables |
+| --- | --- | --- | --- | --- |
+| `Sentinel-1 SAR (10m, ~12-day)` | `COPERNICUS/S1_GRD` | 10 m | ~12 days (S1A alone) / ~6 days (S1A+S1B or S1A+S1C) | `VV`, `VH`, `VV_minus_VH`, `CR`, `IR`, `DpRVI`, `DpRVIc`, `RFDI` |
+
+| Mission | Sensor | Approximate period |
+| --- | --- | --- |
+| Sentinel-1A | C-band SAR | 2014-10-03 to present |
+| Sentinel-1B | C-band SAR | 2016-04-25 to 2021-12-23 (end of life) |
+| Sentinel-1C | C-band SAR | 2023-12-05 to present |
+
+Select years 2015 or later to ensure complete calendar-year coverage. Selecting 2014 returns only the Oct–Dec 2014 portion of that year, which will produce annual statistics based on three months of data.
+
+#### Sentinel-1 SAR variables
+
+All variables are derived from Interferometric Wide (IW) swath mode, GRDH imagery filtered to dual-pol VV+VH acquisitions.
+
+| Variable | Formula | Units | Typical range | Notes |
+| --- | --- | --- | --- | --- |
+| `VV` | VV band direct | dB | −20 to 0 | Co-pol backscatter. Higher over rough surfaces and urban areas. |
+| `VH` | VH band direct | dB | −28 to −5 | Cross-pol backscatter. Sensitive to vegetation volume scattering. |
+| `VV_minus_VH` | VV_dB − VH_dB | dB | 3–25 | Equivalent to 10·log₁₀(VV/VH) in linear. Higher over bare soil and open land. |
+| `CR` | VH_lin / VV_lin | dimensionless linear | 0.01–0.5 | Cross Ratio. Higher with increased canopy volume scattering. |
+| `IR` | VV_lin / VH_lin | dimensionless linear | 2–100+ | Inverse Ratio. Inverse of CR. Large over bare or smooth surfaces. |
+| `DpRVI` | 4q / (1+q)², q = VH_lin/VV_lin | 0–1 | 0–0.8 | Dual-pol Radar Vegetation Index (Mandal et al. 2020). Increases with vegetation density and structure. |
+| `DpRVIc` | DpRVI × (1 − DOP); DOP = \|VV_lin−VH_lin\| / (VV_lin+VH_lin) | 0–1 | 0–0.7 | DpRVI corrected by Degree of Polarization. Equivalent to 8q²/(1+q)³. Penalises high polarimetric contrast. |
+| `RFDI` | (VV_lin − VH_lin) / (VV_lin + VH_lin) | −1 to 1 | −0.3–0.7 | Radar Forest Degradation Index (Mitchard et al. 2012). Higher values indicate surface-dominated scattering; lower values indicate intact forest canopy. |
+
+`VV` and `VH` are stored in **dB** in the GEE collection and are exported in dB. `CR`, `IR`, `DpRVI`, `DpRVIc`, and `RFDI` are computed in linear (power) units before being exported as dimensionless values.
+
+#### Sentinel-1 SAR processing
+
+1. Load `COPERNICUS/S1_GRD` for the AOI and date range.
+2. Filter to `instrumentMode = IW` and `transmitterReceiverPolarisation` containing both `VV` and `VH`.
+3. Ascending and descending orbits are both included; for most EFA applications (annual statistics) the mixing is acceptable. If orbit-specific analysis is required, filter manually in the PRODUCTS registry.
+4. Compute the selected variable:
+   - `VV`, `VH`: direct band selection; values are already in dB.
+   - `VV_minus_VH`: dB difference VV_dB − VH_dB; remains in dB.
+   - `CR`, `IR`, `DpRVI`, `DpRVIc`, `RFDI`: convert VV and VH from dB to linear power (`10^(dB/10)`), then apply the index formula.
+5. Sort by `system:time_start`.
+6. No spatial speckle filtering is applied. For annual EFA statistics, temporal averaging through `Mean`, `Median`, or percentile aggregation handles most speckle. For single-image inspection, speckle can be significant.
+
+**No cloud masking and no temporal gap filling** are applied for Sentinel-1. SAR is cloud-penetrating and operates in all weather conditions. The **Apply QA / Cloud Mask** and **Apply Temporal Gap Fill** controls are automatically disabled in the UI when the Sentinel-1 SAR product is selected.
+
+#### Known limitations for Sentinel-1
+
+- Topographic effects on backscatter are not corrected. In mountainous terrain, steep slopes facing toward or away from the sensor can cause significant backscatter anomalies that are unrelated to surface type.
+- Mixing ascending and descending orbit passes introduces small systematic differences in backscatter over sloped terrain due to different incidence angles. For annual aggregation over flat or gently rolling terrain this effect is minor.
+- Pre-2015 years will return partial-year data or empty collections.
+
 ## Annual aggregation functions
 
 The following statistics are exposed under **Annual Statistics**.
@@ -244,12 +298,13 @@ The **Apply QA / Cloud Mask** option is enabled by default. It controls MODIS/MC
 | `MCD15A3H` | Uses `FparLai_QC` plus `FparExtra_QC`; removes cloud, cloud shadow, and significant cloud/ice contamination. |
 | Landsat Harmonized | Always uses fmask from `QA_PIXEL`: cloud shadow bit 3 must be `0`, and cloud bit 5 must be `0`. The MODIS QA checkbox does not disable this. |
 | Sentinel-2 SR | Always uses SCL: cloud shadow (SCL = 3), medium cloud (SCL = 8), high cloud (SCL = 9), and thin cirrus (SCL = 10) are masked. The MODIS QA checkbox does not disable this. |
+| Sentinel-1 SAR | Not applicable. SAR is cloud-penetrating. The QA mask checkbox is automatically disabled when this product is selected. |
 
 Masking improves scientific quality but reduces the number of valid observations. This matters for `CumSum`, `GSL`, and phenology metrics because those statistics depend strongly on how many valid dates remain.
 
 ## Temporal gap filling
 
-Temporal gap filling is optional and disabled by default. It is applied after masking and variable calculation, but before the final annual statistic.
+Temporal gap filling is optional and disabled by default. It is applied after masking and variable calculation, but before the final annual statistic. Gap filling is **not available for Sentinel-1 SAR**; the control is disabled in the UI and the pipeline bypasses it internally.
 
 When enabled, the app:
 
@@ -358,6 +413,9 @@ MOD13Q1_NDVI_Mean_2020_GFMedianW5_i16x10000
 | `CV`, `CumSum` | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
 | `LST`, `ET`, `LAI`, TCT variables, albedo variables | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
 | Formula-derived `EVI` except `MOD13Q1` catalog EVI | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
+| SAR dB variables: `VV`, `VH`, `VV_minus_VH` | `Int16` | `100` | `_i16x100` | Divide by `100` to recover dB. |
+| SAR `IR` (can exceed 100 over bare surfaces) | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
+| SAR `CR`, `DpRVI`, `DpRVIc`, `RFDI` (0–1 range) | `Int16` | `10000` | `_i16x10000` | Divide by `10000`. |
 | Other cases | `Int16` | `10000` | `_i16x10000` | Divide by `10000`. |
 
 Before integer casting, the app multiplies by the factor and clamps to the chosen integer range:
@@ -379,12 +437,16 @@ For each selected product, year, variable, and statistic, the app follows this o
 4. Apply QA/cloud masking:
    - MODIS/MCD: only when **Apply QA / Cloud Mask** is checked.
    - Landsat: fmask is always applied.
+   - Sentinel-2: SCL masking is always applied.
+   - Sentinel-1 SAR: no masking applied (SAR is cloud-penetrating).
 5. Convert the selected variable into a single-band image collection:
    - `compute` path: map a custom function, then select the requested band.
    - direct band path: select a catalog band and multiply by its scale factor.
    - Landsat path: use the dedicated Landsat branch.
+   - Sentinel-2 path: use the dedicated S2 branch.
+   - Sentinel-1 path: use the dedicated SAR branch (dB-to-linear conversion as needed).
 6. Sort by `system:time_start`.
-7. Apply temporal gap filling if requested.
+7. Apply temporal gap filling if requested (Sentinel-1 SAR always bypasses this step).
 8. Filter back to the target calendar year.
 9. Compute the annual statistic.
 10. Create a Drive export task.
@@ -555,6 +617,7 @@ case 'P50':
 | Section 1 | MODIS QA masks plus DOY and circular transform helpers. |
 | Section 1B | Landsat scale factors, band renaming, fmask, harmonization, Landsat indices, Tasseled Cap, and LST helpers. |
 | Section 1C | Sentinel-2 scale factors, band renaming, SCL masking, spectral indices, and Tasseled Cap helpers (Shi & Xu 2019). |
+| Section 1D | Sentinel-1 SAR dB-to-linear helper, index functions (`S1_VV`, `S1_VH`, `S1_CR`, `S1_IR`, `S1_DpRVI`, `S1_DpRVIc`, `S1_RFDI`), and `S1_INDEX_FNS` lookup table. |
 | Section 2 | MODIS spectral indices, Tasseled Cap, burn index helper, and MOD09Q1 NDVI. |
 | Section 3 | MCD43A1 BRDF/albedo functions. |
 | Section 4 | `PRODUCTS` registry. This controls product and variable options shown in the UI. |
@@ -574,3 +637,5 @@ case 'P50':
 - Roy et al. (2016) - Landsat ETM+/TM to OLI harmonization coefficients.
 - Crist (1985), Huang et al. (2002), and Baig et al. (2014) - Landsat Tasseled Cap coefficients used for LT5, LT7, and LT8 respectively.
 - Shi & Xu (2019) - Sentinel-2 Tasseled Cap coefficients (6-band PCP-derived, aligned to Landsat 8 OLI TCT space). IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sensing, 12(10), 4038–4048. doi:10.1109/JSTARS.2019.2938388
+- Mandal, D., Kumar, V., Ratha, D., Dey, S., Bhattacharya, A., Lopez-Sanchez, J.M., McNairn, H. & Rao, Y.S. (2020) - Dual polarimetric radar vegetation index for crop growth monitoring using Sentinel-1 SAR data. Remote Sensing of Environment, 247, 111954. doi:10.1016/j.rse.2020.111954
+- Mitchard, E.T.A., Saatchi, S.S., White, L.J.T., Abernethy, K.A., Jeffery, K.J., Lewis, S.L., Collins, M., Lefsky, M.A., Leal, M.E., Woodhouse, I.H. & Meir, P. (2012) - Mapping tropical forest biomass with radar and spaceborne LiDAR in Lopé National Park, Gabon: overcoming problems of high biomass and persistent cloud. Biogeosciences, 9(1), 179–191. doi:10.5194/bg-9-179-2012
