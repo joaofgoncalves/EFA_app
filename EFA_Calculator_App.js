@@ -1031,12 +1031,84 @@ function gapFillTemporalReducer(imgCol, windowSize, method) {
     .sort('system:time_start');
 }
 
+// Whittaker smoother: penalized least squares fit with 3rd-order differences.
+// Adapted from TS_Phenology/app/app (whittakerSmoothing).
+// Operates on a single-band ee.ImageCollection; returns a smoothed ImageCollection
+// with the same band name and system:time_start preserved on each image.
+function whittakerSmoothing(imageCollection, lambda) {
+  if (lambda === undefined) lambda = 10;
+
+  // Unpack a flattened array image back into an ImageCollection
+  var unpack = function(arrayImage, imageIds, bands) {
+    function iter(item, icoll) {
+      function innerIter(innerItem, innerList) {
+        return ee.List(innerList).add(ee.String(item).cat('_').cat(ee.String(innerItem)));
+      }
+      var temp = bands.iterate(innerIter, ee.List([]));
+      return ee.ImageCollection(icoll)
+        .merge(ee.ImageCollection(ee.Image(arrayImage).select(temp, bands).set('id', item)));
+    }
+    return ee.ImageCollection(imageIds.iterate(iter, ee.ImageCollection([])));
+  };
+
+  // Build recursive difference matrix of given order
+  var getDifferenceMatrix = function(inputMatrix, order) {
+    var rowCount = ee.Number(inputMatrix.length().get([0]));
+    var left  = inputMatrix.slice(0, 0, rowCount.subtract(1));
+    var right = inputMatrix.slice(0, 1, rowCount);
+    if (order > 1) {
+      return getDifferenceMatrix(left.subtract(right), order - 1);
+    }
+    return left.subtract(right);
+  };
+
+  // Cast to float and unmask to prevent array dimension mismatch
+  var ic = imageCollection.map(function(image) {
+    var t = image.get('system:time_start');
+    return image.toFloat().unmask(0).set('system:time_start', t);
+  });
+
+  // Build penalty matrix: lambda * D'D + I  (3rd-order differences)
+  var dimension = ic.size();
+  var identity = ee.Array.identity(dimension);
+  var D = getDifferenceMatrix(identity, 3);
+  var Dt = D.transpose();
+  var penalty = Dt.multiply(lambda).matrixMultiply(D);
+  var A = penalty.add(identity);
+
+  // Solve A * z = y  for each pixel
+  var arrayImage = ic.toArray();
+  var smoothImage = ee.Image(A).matrixSolve(arrayImage);
+
+  // Unpack smoothed array back to ImageCollection
+  var idList = ee.List(ic.iterate(function(image, list) {
+    return ee.List(list).add(image.id());
+  }, []));
+  var bandList = ee.Image(ic.first()).bandNames();
+  var flatImage = smoothImage.arrayFlatten([idList, bandList]);
+  var smoothCol = unpack(flatImage, idList, bandList);
+
+  // Restore system:time_start from original collection
+  var timeList = ee.List(ic.iterate(function(image, list) {
+    return ee.List(list).add(image.get('system:time_start'));
+  }, []));
+  var smoothColWithTime = smoothCol.iterate(function(image, list) {
+    return ee.List(list).add(
+      image.set('system:time_start', timeList.get(ee.List(list).size()))
+    );
+  }, []);
+
+  return ee.ImageCollection.fromImages(smoothColWithTime)
+    .sort('system:time_start');
+}
+
 // Load, filter, mask, and process a collection for one variable and year.
 // Handles both MODIS (single-collection) and Landsat Harmonized (multi-mission merge).
-function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions) {
+function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions) {
   var product = PRODUCTS[productKey];
   var varConfig = product.variables[varName];
   gapFillOptions = gapFillOptions || {enabled: false};
+  smoothingOptions = smoothingOptions || {enabled: false};
 
   var startDate = ee.Date.fromYMD(year, 1, 1);
   var endDate = startDate.advance(1, 'year');
@@ -1120,6 +1192,9 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     if (gapFillOptions.enabled) {
       col = gapFillTemporalReducer(col, gapFillOptions.window, gapFillOptions.method);
     }
+    if (smoothingOptions.enabled) {
+      col = whittakerSmoothing(col, smoothingOptions.lambda);
+    }
     return col.filterDate(startDate, endDate).sort('system:time_start');
   }
 
@@ -1157,6 +1232,9 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     col = col.sort('system:time_start');
     if (gapFillOptions.enabled) {
       col = gapFillTemporalReducer(col, gapFillOptions.window, gapFillOptions.method);
+    }
+    if (smoothingOptions.enabled) {
+      col = whittakerSmoothing(col, smoothingOptions.lambda);
     }
     return col.filterDate(startDate, endDate).sort('system:time_start');
   }
@@ -1213,6 +1291,10 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
 
   if (gapFillOptions.enabled) {
     col = gapFillTemporalReducer(col, gapFillOptions.window, gapFillOptions.method);
+  }
+
+  if (smoothingOptions.enabled) {
+    col = whittakerSmoothing(col, smoothingOptions.lambda);
   }
 
   return col.filterDate(startDate, endDate)
@@ -1450,6 +1532,7 @@ var yearCheckboxes = {};
 var currentAssetAOI = null;
 var applyQAMask = true;  // Enable science-grade QA / cloud masking by default
 var applyGapFill = false; // Optional temporal interpolation of masked pixels
+var applySmoothing = false; // Experimental Whittaker smoother (off by default)
 
 // --- Styles ---
 var S = {
@@ -1712,6 +1795,34 @@ var gapFillInfo = ui.Label(
    whiteSpace: 'pre-wrap', shown: false}
 );
 
+// ---- Whittaker Smoother Toggle [experimental] ----
+var smoothCheckbox = ui.Checkbox({
+  label: 'Apply Whittaker Smoother [experimental]',
+  value: false,
+  style: {fontSize: '12px', margin: '6px 0 0 0'}
+});
+var smoothLambdaInput = ui.Textbox({
+  value: '10',
+  placeholder: 'Positive number (e.g. 10)',
+  style: {stretch: 'horizontal', fontSize: '12px'}
+});
+var smoothControls = ui.Panel({
+  widgets: [
+    makeRow('Lambda (smoothing):', smoothLambdaInput)
+  ],
+  style: {shown: false, margin: '2px 0 0 12px'}
+});
+var smoothInfo = ui.Label(
+  'WARNING: Experimental and processing-intensive. May cause errors on large ' +
+  'collections or complex geometries (GEE memory limits).\n' +
+  'Applies a penalized least squares fit (3rd-order differences) to the time series. ' +
+  'Higher lambda = smoother curve. Guidance: 1-5 light, 10 moderate, 50-100 heavy.\n' +
+  'Recommendation: enable gap fill first to avoid smoothing over masked pixels ' +
+  '(remaining masked values are set to 0 before smoothing).',
+  {fontSize: '10px', color: '#b35900', margin: '1px 0 4px 12px',
+   whiteSpace: 'pre-wrap', shown: false}
+);
+
 // ---- Calculate Button ----
 var calcButton = ui.Button({
   label: 'CALCULATE & EXPORT',
@@ -1774,6 +1885,7 @@ var mainPanel = ui.Panel({
     exportHeader, exportPanel,
     qaMaskCheckbox, qaMaskInfo,
     gapFillCheckbox, gapFillControls, gapFillInfo,
+    smoothCheckbox, smoothControls, smoothInfo,
     calcButton, statusLabel,
     infoToggle, infoContent
   ],
@@ -1847,6 +1959,13 @@ gapFillCheckbox.onChange(function(checked) {
   applyGapFill = checked;
   gapFillControls.style().set('shown', checked);
   gapFillInfo.style().set('shown', checked);
+});
+
+// --- Whittaker Smoother Toggle ---
+smoothCheckbox.onChange(function(checked) {
+  applySmoothing = checked;
+  smoothControls.style().set('shown', checked);
+  smoothInfo.style().set('shown', checked);
 });
 
 // --- AOI Method Toggle ---
@@ -1962,6 +2081,7 @@ productSelect.onChange(function(productKey) {
   // Re-enable both controls when switching to any non-SAR product.
   qaMaskCheckbox.setDisabled(isSAR);
   gapFillCheckbox.setDisabled(isSAR);
+  smoothCheckbox.setDisabled(isSAR);
   if (isSAR) {
     qaMaskCheckbox.setValue(false);
     applyQAMask = false;
@@ -1969,6 +2089,10 @@ productSelect.onChange(function(productKey) {
     applyGapFill = false;
     gapFillControls.style().set('shown', false);
     gapFillInfo.style().set('shown', false);
+    smoothCheckbox.setValue(false);
+    applySmoothing = false;
+    smoothControls.style().set('shown', false);
+    smoothInfo.style().set('shown', false);
   }
 });
 
@@ -2026,6 +2150,26 @@ function getGapFillOptions() {
     method: method,
     window: windowSize,
     suffix: '_GF' + method + 'W' + windowSize
+  };
+}
+
+function getSmoothingOptions() {
+  applySmoothing = smoothCheckbox.getValue();
+
+  if (!applySmoothing) {
+    return {enabled: false, lambda: 10, suffix: ''};
+  }
+
+  var lambdaText = smoothLambdaInput.getValue().trim();
+  if (!/^\d+(\.\d+)?$/.test(lambdaText) || parseFloat(lambdaText) <= 0) {
+    return {error: 'ERROR: Smoothing lambda must be a positive number.'};
+  }
+
+  var lambda = parseFloat(lambdaText);
+  return {
+    enabled: true,
+    lambda: lambda,
+    suffix: '_WS' + lambda
   };
 }
 
@@ -2090,6 +2234,13 @@ calcButton.onClick(function() {
     return;
   }
 
+  var smoothingOptions = getSmoothingOptions();
+  if (smoothingOptions.error) {
+    statusLabel.style().set('color', 'red');
+    statusLabel.setValue(smoothingOptions.error);
+    return;
+  }
+
   // Parse export settings
   var crs = crsInput.getValue().trim() || 'EPSG:4326';
   var scale = parseInt(scaleInput.getValue(), 10) || PRODUCTS[productKey].resolution;
@@ -2108,6 +2259,9 @@ calcButton.onClick(function() {
   if (gapFillOptions.enabled) {
     prepMsg += '\nTemporal gap fill: ' + gapFillOptions.method +
       ', window ' + gapFillOptions.window;
+  }
+  if (smoothingOptions.enabled) {
+    prepMsg += '\nWhittaker smoother: lambda ' + smoothingOptions.lambda;
   }
   if (exportOptions.mode === 'compact') {
     prepMsg += '\nCompact integer export enabled. Filenames include integer type and divisor.';
@@ -2137,7 +2291,7 @@ calcButton.onClick(function() {
 
     for (var v = 0; v < selectedVars.length; v++) {
       var varName = selectedVars[v];
-      var imgCol = loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions);
+      var imgCol = loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions);
 
       // Per-variable resolution override (e.g. Sentinel-2: 10m for NDVI/EVI/SAVI, 20m for rest)
       var varCfg = PRODUCTS[productKey].variables[varName];
@@ -2157,7 +2311,7 @@ calcButton.onClick(function() {
 
         if (result) {
           var desc = productShort + '_' + varName + '_' + statName + '_' + year +
-            gapFillOptions.suffix;
+            gapFillOptions.suffix + smoothingOptions.suffix;
           createExportTask(result, desc, aoi, crs, effectiveScale, folder, maxPx,
             productKey, varName, statName, exportOptions);
           exportCount++;
@@ -2190,7 +2344,7 @@ calcButton.onClick(function() {
 
   statusLabel.style().set('color', '#27ae60');
   var exportPattern = productShort + '_{Variable}_{Statistic}_{Year}' +
-    gapFillOptions.suffix;
+    gapFillOptions.suffix + smoothingOptions.suffix;
   if (exportOptions.mode === 'compact') {
     exportPattern += '_{i16x10000|i32x10000|i16x1}';
   }
