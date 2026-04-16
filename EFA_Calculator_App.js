@@ -1543,33 +1543,38 @@ var yearButtonsMain = ui.Panel({
   layout: ui.Panel.Layout.flow('horizontal')
 });
 
-var satRangesLabel = ui.Label('Select specific ranges by satellite mission', {fontSize: '11px', color: '#7f8c8d'});
+var satRangesLabel = ui.Label('Select specific ranges by satellite mission', 
+  {fontSize: '11px', color: '#7f8c8d'});
 
 var yearButtonsSatRanges = ui.Panel({
   widgets: [
 
-    ui.Button({label: 'Select MODIS range (>= 2000)', style: S.smallBtn, onClick: function() {
+    ui.Button({label: 'Select MODIS range (2000+)', style: S.smallBtn, 
+      onClick: function() {
       var keys = Object.keys(yearCheckboxes);
       for (var i = 0; i < keys.length; i++) {
         yearCheckboxes[keys[i]].setValue(parseInt(keys[i]) >= 2000);
       }
     }}),
 
-    ui.Button({label: 'Select Landsat range (>= 1984)', style: S.smallBtn, onClick: function() {
+    ui.Button({label: 'Select Landsat range (1984+)', style: S.smallBtn, 
+      onClick: function() {
       var keys = Object.keys(yearCheckboxes);
       for (var i = 0; i < keys.length; i++) {
         yearCheckboxes[keys[i]].setValue(parseInt(keys[i]) >= 1984);
       }
     }}),
 
-    ui.Button({label: 'Select Sentinel-1 range (>= 2015)', style: S.smallBtn, onClick: function() {
+    ui.Button({label: 'Select Sentinel-1 range (2015+)', style: S.smallBtn, 
+      onClick: function() {
       var keys = Object.keys(yearCheckboxes);
       for (var i = 0; i < keys.length; i++) {
         yearCheckboxes[keys[i]].setValue(parseInt(keys[i]) >= 2015);
       }
     }}),
 
-    ui.Button({label: 'Select Sentinel-2 range (>= 2017)', style: S.smallBtn, onClick: function() {
+    ui.Button({label: 'Select Sentinel-2 range (2017+)', style: S.smallBtn, 
+      onClick: function() {
       var keys = Object.keys(yearCheckboxes);
       for (var i = 0; i < keys.length; i++) {
         yearCheckboxes[keys[i]].setValue(parseInt(keys[i]) >= 2017);
