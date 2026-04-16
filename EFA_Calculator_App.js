@@ -1349,6 +1349,43 @@ var yearButtons = ui.Panel({
   layout: ui.Panel.Layout.flow('horizontal')
 });
 
+var satRangesLabel = ui.Label('Select specific ranges by satellite mission', {fontSize: '11px', color: '#7f8c8d'});
+
+var yearButtonsSatRanges = ui.Panel({
+  widgets: [
+
+    ui.Button({label: 'Select MODIS range (>= 2000)', style: S.smallBtn, onClick: function() {
+      var keys = Object.keys(yearCheckboxes);
+      for (var i = 0; i < keys.length; i++) {
+        yearCheckboxes[keys[i]].setValue(parseInt(keys[i]) >= 2000);
+      }
+    }}),
+
+    ui.Button({label: 'Select Landsat range (>= 1984)', style: S.smallBtn, onClick: function() {
+      var keys = Object.keys(yearCheckboxes);
+      for (var i = 0; i < keys.length; i++) {
+        yearCheckboxes[keys[i]].setValue(parseInt(keys[i]) >= 1984);
+      }
+    }}),
+
+    ui.Button({label: 'Select Sentinel-1 range (>= 2015)', style: S.smallBtn, onClick: function() {
+      var keys = Object.keys(yearCheckboxes);
+      for (var i = 0; i < keys.length; i++) {
+        yearCheckboxes[keys[i]].setValue(parseInt(keys[i]) >= 2015);
+      }
+    }}),
+
+    ui.Button({label: 'Select Sentinel-2 range (>= 2017)', style: S.smallBtn, onClick: function() {
+      var keys = Object.keys(yearCheckboxes);
+      for (var i = 0; i < keys.length; i++) {
+        yearCheckboxes[keys[i]].setValue(parseInt(keys[i]) >= 2017);
+      }
+    }})
+
+  ],
+  layout: ui.Panel.Layout.flow('vertical')
+});
+
 // ---- 4. Variables Section ----
 var varsHeader = ui.Label('4. Variables / Dimensions', S.section);
 var varsPanel = ui.Panel({style: {margin: '0 0 0 4px'}});
@@ -1528,7 +1565,7 @@ var mainPanel = ui.Panel({
     aoiHeader, aoiMethodSelect, aoiDrawPanel, assetPathInput, loadAssetBtn, aoiStatus,
     ui.Panel({style: S.sep}),
     productHeader, productSelect, productInfo,
-    yearHeader, yearPanel, yearButtons,
+    yearHeader, yearPanel, yearButtonsMain, satRangesLabel, yearButtonsSatRanges, 
     ui.Panel({style: S.sep}),
     varsHeader, varsPanel, varsButtons,
     statsHeader, statsPanel, statsButtons,
