@@ -1,18 +1,18 @@
 /*
  * ============================================================================
- * EFA Calculator - MODIS, Landsat & Sentinel-2 Annual Statistics
+ * EFA Calculator - MODIS, Landsat, Sentinel-2 & Sentinel-1 SAR Annual Statistics
  * ============================================================================
  *
- * Computes Ecosystem Functional Attributes (EFAs) from MODIS, Landsat &
- * Sentinel-2 time series. EFAs characterize ecosystem functioning through:
+ * Computes Ecosystem Functional Attributes (EFAs) from MODIS, Landsat,
+ * Sentinel-2, and Sentinel-1 SAR time series. EFAs characterize ecosystem
+ * functioning through:
  *   - Magnitude: annual mean/median (productivity proxy)
  *   - Seasonality: CV, StdDev, IQR (variation intensity)
  *   - Phenology: DOY of peak activity with circular transforms
  *
- * Supports 10 MODIS products, 1 Landsat harmonized product, 1 Sentinel-2 product,
- * 20+ spectral/biophysical variables, and 17 annual statistics across 4 categories.
- * Includes Landsat harmonized and Sentinel-2 SR pipelines for reflectance indices
- * and Tasseled Cap.
+ * Supports 10 MODIS products, 1 Landsat harmonized product, 1 Sentinel-2
+ * product, 1 Sentinel-1 SAR product (experimental), 28+ spectral/biophysical/
+ * SAR variables, and 17 annual statistics across 4 categories.
  *
  * References:
  *   Alcaraz-Segura et al. (2006) - EFA framework
@@ -22,8 +22,10 @@
  *   Roy et al. (2016) - Landsat ETM+/TM to OLI harmonization
  *   Crist (1985), Huang et al. (2002), Baig et al. (2014) - Landsat TCT coefficients
  *   Shi & Xu (2019) - Sentinel-2 TCT coefficients (IEEE JSTARS 12:4038-4048)
+ *   Mandal et al. (2020) - DpRVI for Sentinel-1 SAR (Remote Sens. Environ. 247:111954)
+ *   Mitchard et al. (2012) - RFDI forest degradation index (Biogeosciences 9:179-191)
  *
- * Version: v0.3 (2026-04-16)
+ * Version: v0.5 (2026-04-16)
  * ============================================================================
  */
 
@@ -425,6 +427,108 @@ var S2_TCT_FNS = {
 
 
 // ============================================================================
+// SECTION 1D: SENTINEL-1 SAR PIPELINE
+// ============================================================================
+// Collection: COPERNICUS/S1_GRD — IW mode, dual-pol VV+VH, GRDH, 10 m
+// GEE stores backscatter in dB. Ratios and vegetation indices require
+// conversion to linear (power) units. VV, VH, and VV_minus_VH remain in dB.
+// No cloud masking applies to SAR. Gap filling is bypassed for this pipeline.
+// Data available from 2014-10-03 (S1A); full-year statistics start from 2015.
+// S1B added 2016-04-25 (~6-day revisit); S1B EoL 2021-12-23; S1C 2023-12-05.
+//
+// Refs:
+//   Mandal et al. (2020) Remote Sens. Environ. 247:111954     - DpRVI
+//   Mitchard et al. (2012) Biogeosciences 9:179-191           - RFDI
+// ============================================================================
+
+// Convert dB to linear (power) scale: linear = 10^(dB/10)
+function S1_dB2lin(img) {
+  return ee.Image(10).pow(img.divide(10));
+}
+
+// VV backscatter — kept in dB as provided by GEE
+function S1_VV(img) {
+  return img.select('VV').rename('VV')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// VH backscatter — kept in dB as provided by GEE
+function S1_VH(img) {
+  return img.select('VH').rename('VH')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// dB difference VV − VH (= 10·log10(VV_lin/VH_lin)); stays in dB
+function S1_VV_minus_VH(img) {
+  return img.select('VV').subtract(img.select('VH')).rename('VV_minus_VH')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// Cross Ratio CR = VH_lin / VV_lin (linear power; requires dB→linear conversion)
+function S1_CR(img) {
+  var vvLin = S1_dB2lin(img.select('VV'));
+  var vhLin = S1_dB2lin(img.select('VH'));
+  return vhLin.divide(vvLin).rename('CR')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// Inverse Ratio IR = VV_lin / VH_lin (linear power)
+function S1_IR(img) {
+  var vvLin = S1_dB2lin(img.select('VV'));
+  var vhLin = S1_dB2lin(img.select('VH'));
+  return vvLin.divide(vhLin).rename('IR')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// DpRVI: Dual-pol Radar Vegetation Index (Mandal et al. 2020)
+// q = VH_lin / VV_lin;  DpRVI = 4q / (1 + q)^2
+// Range 0 (bare/low vegetation) → 1 (dense vegetation)
+function S1_DpRVI(img) {
+  var vvLin = S1_dB2lin(img.select('VV'));
+  var vhLin = S1_dB2lin(img.select('VH'));
+  var q = vhLin.divide(vvLin);
+  return q.multiply(4).divide(q.add(1).pow(2)).rename('DpRVI')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// DpRVIc: DpRVI corrected by Degree of Polarization (DOP)
+// DOP = |VV_lin − VH_lin| / (VV_lin + VH_lin)
+// DpRVIc = DpRVI × (1 − DOP)  ≡  8q² / (1 + q)³  where q = VH_lin/VV_lin
+// Range 0 → 1; penalises acquisitions with high polarisation contrast
+function S1_DpRVIc(img) {
+  var vvLin = S1_dB2lin(img.select('VV'));
+  var vhLin = S1_dB2lin(img.select('VH'));
+  var q     = vhLin.divide(vvLin);
+  var dpRVI = q.multiply(4).divide(q.add(1).pow(2));
+  var dop   = vvLin.subtract(vhLin).abs().divide(vvLin.add(vhLin));
+  return dpRVI.multiply(ee.Image(1).subtract(dop)).rename('DpRVIc')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// RFDI: Radar Forest Degradation Index (Mitchard et al. 2012)
+// RFDI = (VV_lin − VH_lin) / (VV_lin + VH_lin)
+// Range −1 to 1; sensitive to forest structure and degradation.
+// Higher values indicate surface-dominated scattering (open land, degraded forest).
+function S1_RFDI(img) {
+  var vvLin = S1_dB2lin(img.select('VV'));
+  var vhLin = S1_dB2lin(img.select('VH'));
+  return vvLin.subtract(vhLin).divide(vvLin.add(vhLin)).rename('RFDI')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+var S1_INDEX_FNS = {
+  'VV':          S1_VV,
+  'VH':          S1_VH,
+  'VV_minus_VH': S1_VV_minus_VH,
+  'CR':          S1_CR,
+  'IR':          S1_IR,
+  'DpRVI':       S1_DpRVI,
+  'DpRVIc':      S1_DpRVIc,
+  'RFDI':        S1_RFDI
+};
+
+
+// ============================================================================
 // SECTION 2: SPECTRAL INDEX FUNCTIONS
 // ============================================================================
 
@@ -751,6 +855,30 @@ var PRODUCTS = {
       'TCT_Greenness':  {band: 'TCTG',  resolution: 20},
       'TCT_Wetness':    {band: 'TCTW',  resolution: 20}
     }
+  },
+
+  // ---- Sentinel-1 SAR (experimental) ----
+  // Dedicated pipeline branch in loadAndProcessCollection.
+  // All images filtered to IW mode + dual-pol VV+VH (GRDH, 10 m).
+  // QA masking and temporal gap filling are not applicable for SAR and are
+  // bypassed automatically; the UI disables those controls for this product.
+  // VV/VH/VV_minus_VH are in dB; CR/IR are linear ratios; DpRVI/DpRVIc/RFDI
+  // are dimensionless 0-1. Select years 2015 or later for full-year coverage.
+  'Sentinel-1 SAR (10m, ~12-day)': {
+    type: 'sentinel1',
+    resolution: 10,
+    temporal: '12-day',   // S1A-only revisit; ~6-day when S1B or S1C is active
+    qaMask: null,
+    variables: {
+      'VV':          {band: 'VV'},
+      'VH':          {band: 'VH'},
+      'VV_minus_VH': {band: 'VV_minus_VH'},
+      'CR':          {band: 'CR'},
+      'IR':          {band: 'IR'},
+      'DpRVI':       {band: 'DpRVI'},
+      'DpRVIc':      {band: 'DpRVIc'},
+      'RFDI':        {band: 'RFDI'}
+    }
   }
 };
 
@@ -1033,6 +1161,28 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     return col.filterDate(startDate, endDate).sort('system:time_start');
   }
 
+  // ---- Sentinel-1 SAR branch ----
+  // Filters to IW mode, dual-pol VV+VH. No cloud masking (SAR is all-weather).
+  // Gap filling is not applied regardless of the UI toggle state.
+  if (product.type === 'sentinel1') {
+    var s1raw = ee.ImageCollection('COPERNICUS/S1_GRD')
+      .filter(ee.Filter.eq('instrumentMode', 'IW'))
+      .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+      .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+      .filterBounds(aoi)
+      .filterDate(loadStartDate, loadEndDate);
+
+    var s1IdxFn = S1_INDEX_FNS[varName];
+    var col = s1raw.map(function(img) {
+      return ee.Image(s1IdxFn(img).copyProperties(img, img.propertyNames()));
+    });
+
+    // Gap fill is NOT applied for SAR regardless of gapFillOptions.enabled
+    return col.sort('system:time_start')
+      .filterDate(startDate, endDate)
+      .sort('system:time_start');
+  }
+
   // ---- MODIS branch (original pipeline) ----
   var col = ee.ImageCollection(product.geeId)
     .filterDate(loadStartDate, loadEndDate)
@@ -1103,6 +1253,17 @@ function isAlwaysInt32ExportVariable(varName) {
     varName.indexOf('BSA') >= 0;
 }
 
+// SAR dB variables (VV, VH, VV_minus_VH): typical range -30 to +20 dB.
+// Factor 100 → Int16 range covers -327 to +327 dB with 0.01 dB precision.
+function isSARdBVariable(varName) {
+  return varName === 'VV' || varName === 'VH' || varName === 'VV_minus_VH';
+}
+
+// IR (VV_lin/VH_lin) is unbounded in forested and open land; requires Int32.
+function isSARLinearUnbounded(varName) {
+  return varName === 'IR';
+}
+
 function isCatalogBoundedEVI(productKey, varName) {
   return varName === 'EVI' && productKey === 'MOD13Q1 (250m, 16-day)';
 }
@@ -1135,6 +1296,18 @@ function getCompactExportEncoding(productKey, varName, statName) {
     return makeExportEncoding('int32', 10000);
   }
 
+  // SAR dB variables: use factor 100 (not 10000) to stay within Int16 range.
+  // Recover original dB by dividing the exported integer value by 100.
+  if (isSARdBVariable(varName)) {
+    return makeExportEncoding('int16', 100);
+  }
+
+  // SAR IR can be large (VV/VH > 100 over bare soil); Int32 needed.
+  if (isSARLinearUnbounded(varName)) {
+    return makeExportEncoding('int32', 10000);
+  }
+
+  // SAR CR, DpRVI, DpRVIc, RFDI are all bounded 0–1 → default Int16 × 10000.
   return makeExportEncoding('int16', 10000);
 }
 
@@ -1238,6 +1411,30 @@ function getDefaultVisParams(varName, statName) {
   if (varName === 'NBR' || varName === 'NDWI') {
     return {min: -0.5, max: 0.8, palette: ['brown', 'white', 'blue']};
   }
+  // SAR backscatter — values in dB
+  if (varName === 'VV') {
+    return {min: -20, max: 0, palette: ['black', 'gray', 'white']};
+  }
+  if (varName === 'VH') {
+    return {min: -28, max: -5, palette: ['black', 'gray', 'white']};
+  }
+  if (varName === 'VV_minus_VH') {
+    return {min: 3, max: 20, palette: ['blue', 'cyan', 'yellow', 'red']};
+  }
+  // SAR ratios — linear units
+  if (varName === 'CR') {
+    return {min: 0.01, max: 0.5, palette: ['darkblue', 'cyan', 'green', 'yellow']};
+  }
+  if (varName === 'IR') {
+    return {min: 2, max: 15, palette: ['darkgreen', 'yellow', 'red']};
+  }
+  // SAR vegetation / structure indices (0–1)
+  if (varName === 'DpRVI' || varName === 'DpRVIc') {
+    return {min: 0, max: 0.7, palette: ['brown', 'yellow', 'green', 'darkgreen']};
+  }
+  if (varName === 'RFDI') {
+    return {min: -0.3, max: 0.5, palette: ['darkgreen', 'yellow', 'red']};
+  }
   return {min: 0, max: 1};
 }
 
@@ -1269,7 +1466,7 @@ var S = {
 // --- Title ---
 var titleLabel = ui.Label('EFA Calculator', S.title);
 var subtitleLabel = ui.Label(
-  'Ecosystem Functional Attributes from MODIS, Landsat & Sentinel-2 Annual Time Series', S.subtitle);
+  'Ecosystem Functional Attributes from MODIS, Landsat, Sentinel-2 & Sentinel-1 SAR', S.subtitle);
 
 // ---- 1. AOI Section ----
 var aoiHeader = ui.Label('1. Area of Interest', S.section);
@@ -1329,16 +1526,13 @@ var yearPanel = ui.Panel({
   layout: ui.Panel.Layout.flow('horizontal'),
   style: {margin: '0 0 0 0'}
 });
-var yearButtons = ui.Panel({
+
+var yearButtonsMain = ui.Panel({
   widgets: [
+
     ui.Button({label: 'Select All', style: S.smallBtn, onClick: function() {
       var keys = Object.keys(yearCheckboxes);
       for (var i = 0; i < keys.length; i++) yearCheckboxes[keys[i]].setValue(true);
-    }}),
-
-    ui.Button({label: 'Select MODIS range', style: S.smallBtn, onClick: function() {
-      var keys = Object.keys(yearCheckboxes);
-      for (var i = 16; i < keys.length; i++) yearCheckboxes[keys[i]].setValue(true);
     }}),
 
     ui.Button({label: 'Clear All', style: S.smallBtn, onClick: function() {
@@ -1476,7 +1670,9 @@ var qaMaskInfo = ui.Label(
   'For MODIS: removes clouds, cloud shadows, cirrus, and low-quality ' +
   'observations using each product\'s QA/QC band(s).\n' +
   'For Landsat Harmonized: fmask (cloud + cloud shadow) is always applied.\n' +
-  'For Sentinel-2 SR: SCL cloud/shadow masking is always applied inside the pipeline.',
+  'For Sentinel-2 SR: SCL cloud/shadow masking is always applied inside the pipeline.\n' +
+  'For Sentinel-1 SAR: not applicable — SAR is cloud-penetrating. ' +
+  'QA mask and gap fill are automatically disabled for SAR products.',
   {fontSize: '10px', color: '#7f8c8d', margin: '1px 0 4px 12px', whiteSpace: 'pre-wrap'}
 );
 
@@ -1728,6 +1924,8 @@ productSelect.onChange(function(productKey) {
     }
   }
 
+  var isSAR = (product.type === 'sentinel1');
+
   var infoText;
   if (product.type === 'landsat') {
     infoText = product.resolution + 'm | scenes | ' + varNames.length + ' variable(s)' +
@@ -1740,6 +1938,11 @@ productSelect.onChange(function(productKey) {
       '  S2A/B: 2017–present\n' +
       '  10 m: NDVI, EVI, SAVI  ·  20 m: NDWI, NBR, TCT\n' +
       '  TCT: Shi & Xu (2019), 6-band PCP, aligned to Landsat 8 TCT space.';
+  } else if (product.type === 'sentinel1') {
+    infoText = '10m | ~12-day | ' + varNames.length + ' variable(s) | SAR — cloud-penetrating\n' +
+      '  S1A: 2014-10-03+  ·  S1B: 2016–2021  ·  S1C: 2023-present\n' +
+      '  IW mode, VV+VH dual-pol  ·  Select years 2015 or later for full-year coverage\n' +
+      '  dB: VV, VH, VV−VH  ·  linear ratio: CR, IR  ·  0–1: DpRVI, DpRVIc, RFDI';
   } else {
     infoText = product.resolution + 'm | ' + product.temporal +
       ' | ' + varNames.length + ' variable(s)' +
@@ -1749,6 +1952,19 @@ productSelect.onChange(function(productKey) {
     }
   }
   productInfo.setValue(infoText);
+
+  // For SAR: disable QA masking and gap fill (not applicable for radar data).
+  // Re-enable both controls when switching to any non-SAR product.
+  qaMaskCheckbox.setDisabled(isSAR);
+  gapFillCheckbox.setDisabled(isSAR);
+  if (isSAR) {
+    qaMaskCheckbox.setValue(false);
+    applyQAMask = false;
+    gapFillCheckbox.setValue(false);
+    applyGapFill = false;
+    gapFillControls.style().set('shown', false);
+    gapFillInfo.style().set('shown', false);
+  }
 });
 
 // --- Gather Selections ---
