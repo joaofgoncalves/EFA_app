@@ -14,6 +14,15 @@
  * product, 1 Sentinel-1 SAR product (experimental), 28+ spectral/biophysical/
  * SAR variables, and 17 annual statistics across 4 categories.
  *
+ * Optional time-series smoothing before annual aggregation:
+ *   - Temporal gap fill: fills masked pixels from a centered image window
+ *   - Whittaker smoother: penalized least-squares (3rd-order differences)
+ *   - Moving-window smoother: per-image median or mean in a sliding window
+ *   - Harmonic smoother: Fourier OLS fit (1–3 annual harmonics)
+ * All smoothers support an edge-buffer option that loads extra months before
+ * and after the target year to reduce boundary effects, then strips the
+ * buffer before computing annual statistics.
+ *
  * References:
  *   Alcaraz-Segura et al. (2006) - EFA framework
  *   Paruelo et al. (2001) - Ecosystem functional types
@@ -25,7 +34,7 @@
  *   Mandal et al. (2020) - DpRVI for Sentinel-1 SAR (Remote Sens. Environ. 247:111954)
  *   Mitchard et al. (2012) - RFDI forest degradation index (Biogeosciences 9:179-191)
  *
- * Version: v0.6 (2026-04-17)
+ * Version: v0.7 (2026-04-17)
  * ============================================================================
  */
 
@@ -1920,7 +1929,35 @@ var mwInfo = ui.Label(
    whiteSpace: 'pre-wrap', shown: false}
 );
 
-// ---- Smoothing Edge Buffer (shared by Whittaker and Moving-Window) ----
+// ---- Harmonic Smoother ----
+var harmonicCheckbox = ui.Checkbox({
+  label: 'Apply Harmonic Smoother [experimental]',
+  value: false,
+  style: {fontSize: '12px', margin: '6px 0 0 0'}
+});
+var harmonicNumInput = ui.Textbox({
+  value: '2',
+  placeholder: '1, 2 or 3',
+  style: {stretch: 'horizontal', fontSize: '12px'}
+});
+var harmonicControls = ui.Panel({
+  widgets: [makeRow('Harmonics (1\u20133):', harmonicNumInput)],
+  style: {shown: false, margin: '2px 0 0 12px'}
+});
+var harmonicInfo = ui.Label(
+  'WARNING: Experimental and compute-intensive. Fits a Fourier model ' +
+  '(intercept + N annual harmonic pairs) to each pixel\'s time series using ' +
+  'ordinary least squares, then replaces each observation with the modelled ' +
+  'value at that timestamp.\n' +
+  'Harmonics: 1 = annual cycle only (3 params); 2 = + semi-annual (5 params); ' +
+  '3 = + tertiary (7 params).\n' +
+  'Recommendation: use \u2265 6-month buffer (default) for better edge estimation. ' +
+  'Enable gap fill first if cloud cover is heavy.',
+  {fontSize: '10px', color: '#b35900', margin: '1px 0 4px 12px',
+   whiteSpace: 'pre-wrap', shown: false}
+);
+
+// ---- Smoothing Edge Buffer (shared by Whittaker, Moving-Window, and Harmonic) ----
 var smoothBufferInput = ui.Textbox({
   value: '3',
   placeholder: 'Integer >= 0 (default 3)',
@@ -1963,6 +2000,19 @@ var infoContent = ui.Label(
   '  Dispersion: StdDev, IQR(P95-P05) - interquantile range, MAD - Median Absolute Deviation, CV(StdDev/Mean) - Coefficient of Variation\n' +
   '  Phenology: DOY_Max, DOY_Min, Springness, Winterness, GSL\n' +
   '  Integration: CumSum (annual sum), Amplitude (Max-Min)\n\n' +
+  'Time-series smoothing (applied before annual aggregation):\n' +
+  '  Gap fill - fills masked pixels from a centered image-count window.\n' +
+  '  Whittaker - penalized least-squares with 3rd-order differences.\n' +
+  '    Lambda controls smoothness (1-5 light, 10 moderate, 50-100 heavy).\n' +
+  '  Moving-window - replaces each image with the median/mean of its\n' +
+  '    temporal neighbours within a sliding window (size in images).\n' +
+  '  Harmonic - fits a Fourier model (intercept + N harmonic pairs) via\n' +
+  '    OLS and replaces each observation with the modelled value.\n' +
+  '    1 harmonic = annual cycle; 2 = + semi-annual; 3 = + tertiary.\n' +
+  '  Buffer months - all smoothers can load N extra months before Jan 1\n' +
+  '    and after Dec 31 to reduce edge effects; the buffer is stripped\n' +
+  '    before annual statistics are computed (default 3 months, 6 for\n' +
+  '    harmonic). Suffix in export name: _GF*, _WS*, _MW*, _HS*, _B*.\n\n' +
   'Landsat Harmonized product:\n' +
   '  LT5 (1984–2013) + LT7 (1999–) + LT8 (2013–), C02 T1 L2.\n' +
   '  Reflectance indices (NDVI, EVI, SAVI, NBR, NDWI) use ETM+/TM→OLI\n' +
