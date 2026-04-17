@@ -891,6 +891,19 @@ var PRODUCTS = {
   }
 };
 
+// Maps each mission label to its PRODUCTS keys (order determines dropdown order)
+var MISSION_GROUPS = {
+  'MODIS':      ['MOD09Q1 (250m, 8-day)', 'MOD09A1 (500m, 8-day)',
+                 'MOD11A1 (1km, Daily)',   'MOD11A2 (1km, 8-day)',
+                 'MOD13Q1 (250m, 16-day)', 'MOD17A2H (500m, 8-day)',
+                 'MCD43A1 (500m, Daily)',  'MOD16A2 (500m, 8-day)',
+                 'MCD15A3H (500m, 4-day)'],
+  'Landsat':    ['Landsat Harmonized (30m, LT5/7/8)'],
+  'Sentinel-2': ['Sentinel-2 SR (10/20m, 5-day)'],
+  'Sentinel-1': ['Sentinel-1 SAR (10m, ~12-day)']
+};
+var MISSION_NAMES = ['MODIS', 'Landsat', 'Sentinel-2', 'Sentinel-1'];
+
 
 // ============================================================================
 // SECTION 5: STATISTICS ENGINE
@@ -1720,11 +1733,33 @@ var loadAssetBtn = ui.Button({
 });
 var aoiStatus = ui.Label('Draw an AOI on the map to begin.', {fontSize: '11px', color: '#7f8c8d'});
 
-// ---- 2. Product Section ----
-var productHeader = ui.Label('2. Satellite Product', S.section);
+// ---- 2. Satellite Product Section ----
+var productHeader  = ui.Label('2. Satellite Product', S.section);
+var missionSubHeader = ui.Label('Mission', S.category);
+var productSubHeader = ui.Label('Product', S.category);
+
+// Level 2.1 — mission radio buttons
+var selectedMission = null;
+var missionButtons  = {};
+var missionPanel = ui.Panel({
+  layout: ui.Panel.Layout.flow('horizontal'),
+  style:  {stretch: 'horizontal', margin: '2px 0 4px 0'}
+});
+var S_btnSel   = {backgroundColor: '#1a73e8', color: '#1a73e8',   fontWeight: 'bold',
+                  fontSize: '11px', margin: '2px', padding: '4px 8px'};
+var S_btnUnsel = {backgroundColor: '#f0f0f0', color: '#333333', fontWeight: 'normal',
+                  fontSize: '11px', margin: '2px', padding: '4px 8px'};
+MISSION_NAMES.forEach(function(m) {
+  var btn = ui.Button({label: m, style: S_btnUnsel});
+  missionButtons[m] = btn;
+  missionPanel.add(btn);
+});
+
+// Level 2.2 — product dropdown (populated when a mission is selected)
 var productSelect = ui.Select({
-  items: Object.keys(PRODUCTS),
+  items: [],
   placeholder: 'Select a product...',
+  disabled: true,
   style: {stretch: 'horizontal', fontSize: '12px'}
 });
 var productInfo = ui.Label('', {fontSize: '11px', color: '#7f8c8d'});
@@ -2111,7 +2146,7 @@ var mainPanel = ui.Panel({
     ui.Panel({style: S.sep}),
     aoiHeader, aoiMethodSelect, aoiDrawPanel, assetPathInput, loadAssetBtn, aoiStatus,
     ui.Panel({style: S.sep}),
-    productHeader, productSelect, productInfo,
+    productHeader, missionSubHeader, missionPanel, productSubHeader, productSelect, productInfo,
     yearHeader, yearPanel, yearButtonsMain, satRangesLabel, yearButtonsSatRanges, 
     ui.Panel({style: S.sep}),
     varsHeader, varsPanel, varsButtons,
@@ -2310,6 +2345,35 @@ function getAOI() {
   }
   return ee.FeatureCollection(features).geometry();
 }
+
+// --- Mission Selection ---
+function selectMission(missionName) {
+  selectedMission = missionName;
+
+  // Update button visual states
+  MISSION_NAMES.forEach(function(m) {
+    missionButtons[m].style().set(m === missionName ? S_btnSel : S_btnUnsel);
+  });
+
+  // Populate the product dropdown with products for this mission
+  var products = MISSION_GROUPS[missionName];
+  productSelect.setDisabled(false);
+  productSelect.items().reset(products);
+
+  // Auto-select if only one product (Landsat, Sentinel-1, Sentinel-2)
+  if (products.length === 1) {
+    productSelect.setValue(products[0], true);  // fires onChange
+  } else {
+    productSelect.setValue(null);               // reset to placeholder
+    varsPanel.widgets().reset([]);
+    variableCheckboxes = {};
+    productInfo.setValue('');
+  }
+}
+
+MISSION_NAMES.forEach(function(m) {
+  missionButtons[m].onClick(function() { selectMission(m); });
+});
 
 // --- Product Change ---
 productSelect.onChange(function(productKey) {
