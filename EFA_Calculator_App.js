@@ -573,6 +573,74 @@ var S1_INDEX_FNS = {
 
 
 // ============================================================================
+// SECTION 1E: SENTINEL-3 OLCI PIPELINE
+// ============================================================================
+// Supports: COPERNICUS/S3/OLCI — Level-1 EFR TOA radiances, 300m, 2016-10-18+
+// Bands are TOA radiances with per-band scale factors (not a uniform reflectance factor).
+// Scale factors applied before index computation; no renaming to common schema needed.
+// No TCT: no published TCT coefficients for OLCI in the literature.
+// QA masking always applied: removes invalid pixels and band saturation in key bands.
+// Ref: Dash & Curran (2004) Int. J. Remote Sens. 25:5403-5413 (OTCI/MTCI)
+// ============================================================================
+
+// Apply per-band scale factors to the five bands used in index computation.
+// Oa06=Green(560nm), Oa08=Red(665nm), Oa10=681nm, Oa11=RedEdge(709nm), Oa17=NIR(865nm)
+function applyS3ScaleFactors(img) {
+  return img
+    .addBands(img.select('Oa06_radiance').multiply(0.0123538),  null, true)
+    .addBands(img.select('Oa08_radiance').multiply(0.00876539), null, true)
+    .addBands(img.select('Oa10_radiance').multiply(0.00773378), null, true)
+    .addBands(img.select('Oa11_radiance').multiply(0.00675523), null, true)
+    .addBands(img.select('Oa17_radiance').multiply(0.00493004), null, true);
+}
+
+// Mask invalid pixels (bit 25) and saturated pixels in the five computation bands.
+// Saturation flags: Oa01=bit0 … Oa06=bit5, Oa08=bit7, Oa10=bit9, Oa11=bit10, Oa17=bit16.
+// Bit 27 (bright/glint) not masked here — too aggressive for general land use.
+function maskQA_S3(img) {
+  var qa = img.select('quality_flags');
+  return img.updateMask(
+    qa.bitwiseAnd(1 << 25).eq(0)          // invalid pixel
+      .and(qa.bitwiseAnd(1 <<  5).eq(0))  // Oa06 saturated
+      .and(qa.bitwiseAnd(1 <<  7).eq(0))  // Oa08 saturated
+      .and(qa.bitwiseAnd(1 <<  9).eq(0))  // Oa10 saturated
+      .and(qa.bitwiseAnd(1 << 10).eq(0))  // Oa11 saturated
+      .and(qa.bitwiseAnd(1 << 16).eq(0))  // Oa17 saturated
+  );
+}
+
+function S3_NDVI(img) {
+  return img.normalizedDifference(['Oa17_radiance', 'Oa08_radiance'])
+    .rename('NDVI').set('system:time_start', img.get('system:time_start'));
+}
+
+// OLCI Terrestrial Chlorophyll Index (OTCI) — ESA standard OLCI land product,
+// continuation of the MERIS MTCI. Exploits the three red-edge bands unique to OLCI.
+// Range typically 0–7 for vegetation; can exceed Int16 range — export requires Int32.
+function S3_OTCI(img) {
+  return img.expression(
+    '(Oa11 - Oa10) / (Oa10 - Oa08)',
+    { Oa11: img.select('Oa11_radiance').toFloat(),
+      Oa10: img.select('Oa10_radiance').toFloat(),
+      Oa08: img.select('Oa08_radiance').toFloat() }
+  ).rename('OTCI').set('system:time_start', img.get('system:time_start'));
+}
+
+// NDWI (McFeeters 1996): (Green - NIR) / (Green + NIR)
+// Sensitive to open water and vegetation water content.
+function S3_NDWI(img) {
+  return img.normalizedDifference(['Oa06_radiance', 'Oa17_radiance'])
+    .rename('NDWI').set('system:time_start', img.get('system:time_start'));
+}
+
+var S3_INDEX_FNS = {
+  'NDVI': S3_NDVI,
+  'OTCI': S3_OTCI,
+  'NDWI': S3_NDWI
+};
+
+
+// ============================================================================
 // SECTION 2: SPECTRAL INDEX FUNCTIONS
 // ============================================================================
 
@@ -1027,6 +1095,23 @@ var PRODUCTS = {
       'DpRVIc':      {band: 'DpRVIc'},
       'RFDI':        {band: 'RFDI'}
     }
+  },
+
+  // ---- Sentinel-3 OLCI (S3A + S3B, Level-1 EFR TOA radiances, 300m) ----
+  // Collection loading is handled by the sentinel3 branch in loadAndProcessCollection.
+  // Per-band scale factors are applied before index computation (bands differ in scale).
+  // QA masking (invalid + saturation) always applied. No TCT available for OLCI.
+  'Sentinel-3 OLCI (300m, ~2-day)': {
+    type: 'sentinel3',
+    geeId: 'COPERNICUS/S3/OLCI',
+    resolution: 300,
+    temporal: '2-day',
+    qaMask: null,   // invalid + saturation masking applied inside pipeline
+    variables: {
+      'NDVI': {band: 'NDVI'},
+      'OTCI': {band: 'OTCI'},
+      'NDWI': {band: 'NDWI'}
+    }
   }
 };
 
@@ -1044,9 +1129,10 @@ var MISSION_GROUPS = {
                  'Landsat 8 OLI (30m, 2013+)',
                  'Landsat 9 OLI-2 (30m, 2021+)'],
   'Sentinel-2': ['Sentinel-2 SR (10/20m, 5-day)'],
+  'Sentinel-3': ['Sentinel-3 OLCI (300m, ~2-day)'],
   'Sentinel-1': ['Sentinel-1 SAR (10m, ~12-day)']
 };
-var MISSION_NAMES = ['MODIS', 'Landsat', 'Sentinel-2', 'Sentinel-1'];
+var MISSION_NAMES = ['MODIS', 'Landsat', 'Sentinel-2', 'Sentinel-3', 'Sentinel-1'];
 
 // Per-product year-range button definitions.
 // Each entry is an array of {label, start, end?} objects; end omitted means open-ended.
@@ -1072,6 +1158,7 @@ var PRODUCT_YEAR_RANGES = {
   'Landsat 8 OLI (30m, 2013+)':      [{label: 'LT8 range (2013+)',     start: 2013}],
   'Landsat 9 OLI-2 (30m, 2021+)':    [{label: 'LT9 range (2021+)',     start: 2021}],
   'Sentinel-2 SR (10/20m, 5-day)':     [{label: 'Sentinel-2 range (2017+)', start: 2017}],
+  'Sentinel-3 OLCI (300m, ~2-day)':   [{label: 'Sentinel-3 range (2017+)', start: 2017}],
   'Sentinel-1 SAR (10m, ~12-day)':     [{label: 'Sentinel-1 range (2015+)', start: 2015}]
 };
 
@@ -1636,6 +1723,40 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
       .sort('system:time_start');
   }
 
+  // ---- Sentinel-3 OLCI branch ----
+  // Radiances scaled per-band (applyS3ScaleFactors); QA masking always applied.
+  // Gap fill and all smoothers are supported; no SAR-style restrictions.
+  if (product.type === 'sentinel3') {
+    var s3Filter = ee.Filter.and(
+      ee.Filter.bounds(aoi),
+      ee.Filter.date(loadStartDate, loadEndDate)
+    );
+    var s3raw = ee.ImageCollection(product.geeId).filter(s3Filter);
+    s3raw = s3raw.map(maskQA_S3);
+
+    var s3IdxFn = S3_INDEX_FNS[varName];
+    var col = s3raw.map(function(img) {
+      var orig = img;
+      img = applyS3ScaleFactors(img);
+      return ee.Image(s3IdxFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
+    });
+
+    col = col.sort('system:time_start');
+    if (gapFillOptions.enabled) {
+      col = gapFillTemporalReducer(col, gapFillOptions.window, gapFillOptions.method);
+    }
+    if (smoothingOptions.enabled) {
+      col = whittakerSmoothing(col, smoothingOptions.lambda);
+    }
+    if (mwOptions.enabled) {
+      col = movingWindowSmooth(col, mwOptions.window, mwOptions.method);
+    }
+    if (harmonicOptions.enabled) {
+      col = harmonicSmoothing(col, harmonicOptions.numHarmonics);
+    }
+    return col.filterDate(startDate, endDate).sort('system:time_start');
+  }
+
   // ---- MODIS branch (original pipeline) ----
   var col = ee.ImageCollection(product.geeId)
     .filterDate(loadStartDate, loadEndDate)
@@ -1715,7 +1836,8 @@ function isAlwaysInt32ExportVariable(varName) {
     varName.indexOf('TCT') >= 0 ||
     varName.indexOf('Albedo') >= 0 ||
     varName.indexOf('WSA') >= 0 ||
-    varName.indexOf('BSA') >= 0;
+    varName.indexOf('BSA') >= 0 ||
+    varName === 'OTCI';   // red-edge ratio; typical max ~7 → ×10000 exceeds Int16
 }
 
 // SAR dB variables (VV, VH, VV_minus_VH): typical range -30 to +20 dB.
@@ -2656,6 +2778,12 @@ productSelect.onChange(function(productKey) {
       '  S2A/B: 2017–present\n' +
       '  10 m: NDVI, EVI, SAVI  ·  20 m: NDWI, NBR, TCT\n' +
       '  TCT: Shi & Xu (2019), 6-band PCP, aligned to Landsat 8 TCT space.';
+  } else if (product.type === 'sentinel3') {
+    infoText = '300m | ' + product.temporal + ' | ' + varNames.length +
+      ' variable(s) | QA masking always applied (invalid + saturated pixels)\n' +
+      '  S3A: 2016-10-18+  ·  S3B: 2018-04-26+  ·  ~1–2 day revisit\n' +
+      '  NDVI (Oa08/Oa17)  ·  OTCI: red-edge chlorophyll index (Oa08/Oa10/Oa11)  ·  NDWI (Oa06/Oa17)\n' +
+      '  No TCT: no published OLCI TCT coefficients. TOA radiances scaled per-band before index computation.';
   } else if (product.type === 'sentinel1') {
     infoText = '10m | ~12-day | ' + varNames.length + ' variable(s) | SAR — cloud-penetrating\n' +
       '  S1A: 2014-10-03+  ·  S1B: 2016–2021  ·  S1C: 2023-present\n' +
