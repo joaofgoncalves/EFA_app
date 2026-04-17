@@ -1892,8 +1892,11 @@ var statsButtons = ui.Panel({
   layout: ui.Panel.Layout.flow('horizontal')
 });
 
-// ---- 6. Export Settings Section ----
-var exportHeader = ui.Label('6. Export Settings', S.section);
+// ---- 6. Pre-processing Options Section ----
+var preprocHeader = ui.Label('6. Pre-processing Options', S.section);
+
+// ---- 7. Export Settings Section ----
+var exportHeader = ui.Label('7. Export Settings', S.section);
 
 function makeRow(labelText, widget) {
   return ui.Panel({
@@ -1937,7 +1940,7 @@ var qaMaskInfo = ui.Label(
   'For Sentinel-2 SR: SCL cloud/shadow masking is always applied inside the pipeline.\n' +
   'For Sentinel-1 SAR: not applicable — SAR is cloud-penetrating. ' +
   'QA mask and gap fill are automatically disabled for SAR products.',
-  {fontSize: '10px', color: '#7f8c8d', margin: '1px 0 4px 12px', whiteSpace: 'pre-wrap'}
+  {fontSize: '10px', color: '#7f8c8d', margin: '1px 0 4px 12px', whiteSpace: 'pre-wrap', shown: true}
 );
 
 // ---- Temporal Gap-Filling Toggle ----
@@ -2152,13 +2155,15 @@ var mainPanel = ui.Panel({
     varsHeader, varsPanel, varsButtons,
     statsHeader, statsPanel, statsButtons,
     ui.Panel({style: S.sep}),
-    exportHeader, exportPanel,
+    preprocHeader,
     qaMaskCheckbox, qaMaskInfo,
     gapFillCheckbox, gapFillControls, gapFillInfo,
     smoothCheckbox, smoothControls, smoothInfo,
     mwCheckbox, mwControls, mwInfo,
     harmonicCheckbox, harmonicControls, harmonicInfo,
     smoothBufferPanel, smoothBufferInfo,
+    ui.Panel({style: S.sep}),
+    exportHeader, exportPanel,
     calcButton, statusLabel,
     infoToggle, infoContent
   ],
@@ -2225,6 +2230,7 @@ toggleAoiBtn.onClick(function() {
 // --- QA Mask Toggle ---
 qaMaskCheckbox.onChange(function(checked) {
   applyQAMask = checked;
+  qaMaskInfo.style().set('shown', checked);
 });
 
 // --- Temporal Gap Fill Toggle ---
