@@ -1143,14 +1143,70 @@ function movingWindowSmooth(imgCol, windowSize, method) {
     .sort('system:time_start');
 }
 
+// Harmonic (Fourier) smoother: fits a sum of annual harmonics to each pixel's time
+// series using ordinary least squares, then replaces every observation with the
+// modelled value at that timestamp.
+//   numHarmonics 1 → annual cycle only      (3 params: intercept + sin + cos)
+//   numHarmonics 2 → + semi-annual          (5 params)
+//   numHarmonics 3 → + tertiary cycle       (7 params)
+// Masked pixels are excluded from the OLS fit; pixels with no valid observations
+// remain masked in the output.
+function harmonicSmoothing(imgCol, numHarmonics) {
+  if (numHarmonics === undefined) numHarmonics = 2;
+  var numX = 1 + 2 * numHarmonics;  // intercept + sin/cos pair per harmonic
+
+  var sorted = imgCol.sort('system:time_start');
+  var t0 = ee.Date(ee.Image(sorted.first()).get('system:time_start'));
+  var bandName = ee.Image(sorted.first()).bandNames().get(0);
+
+  // Build design matrix [1, sin(2πkt), cos(2πkt)… | response] per image.
+  // JS for-loop is valid here — numHarmonics is a client-side integer.
+  var designCol = sorted.map(function(img) {
+    var t = ee.Date(img.get('system:time_start')).difference(t0, 'year');
+    var ts = img.get('system:time_start');
+    var row = ee.Image(1).rename('c');
+    for (var k = 1; k <= numHarmonics; k++) {
+      var angle = t.multiply(k * 2 * Math.PI);
+      row = row
+        .addBands(ee.Image(angle.sin()).rename('s' + k))
+        .addBands(ee.Image(angle.cos()).rename('c' + k));
+    }
+    return row.addBands(img.select([bandName]).rename('y'))
+              .toDouble()
+              .set('system:time_start', ts);
+  });
+
+  // Fit: coefficients image has shape [numX, 1]; masked pixels in the response
+  // band are naturally excluded from the regression.
+  var coeffs = designCol.reduce(ee.Reducer.linearRegression(numX, 1))
+                        .select('coefficients');
+
+  // Predict at each original timestamp using the fitted coefficients.
+  var predicted = sorted.map(function(img) {
+    var t = ee.Date(img.get('system:time_start')).difference(t0, 'year');
+    var ts = img.get('system:time_start');
+    var pred = ee.Image(coeffs.arrayGet([0, 0]));  // intercept
+    for (var k = 1; k <= numHarmonics; k++) {
+      var angle = t.multiply(k * 2 * Math.PI);
+      pred = pred
+        .add(ee.Image(coeffs.arrayGet([2 * k - 1, 0])).multiply(angle.sin()))
+        .add(ee.Image(coeffs.arrayGet([2 * k,     0])).multiply(angle.cos()));
+    }
+    return pred.rename(ee.List([bandName])).toFloat().set('system:time_start', ts);
+  });
+
+  return ee.ImageCollection(predicted).sort('system:time_start');
+}
+
 // Load, filter, mask, and process a collection for one variable and year.
 // Handles both MODIS (single-collection) and Landsat Harmonized (multi-mission merge).
-function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions, mwOptions) {
+function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions, mwOptions, harmonicOptions) {
   var product = PRODUCTS[productKey];
   var varConfig = product.variables[varName];
   gapFillOptions = gapFillOptions || {enabled: false};
   smoothingOptions = smoothingOptions || {enabled: false};
   mwOptions = mwOptions || {enabled: false};
+  harmonicOptions = harmonicOptions || {enabled: false, numHarmonics: 2, bufferMonths: 0};
 
   var startDate = ee.Date.fromYMD(year, 1, 1);
   var endDate = startDate.advance(1, 'year');
@@ -1176,6 +1232,8 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     smoothMonths = smoothingOptions.bufferMonths;
   } else if (mwOptions.enabled && mwOptions.bufferMonths > 0) {
     smoothMonths = mwOptions.bufferMonths;
+  } else if (harmonicOptions.enabled && harmonicOptions.bufferMonths > 0) {
+    smoothMonths = harmonicOptions.bufferMonths;
   }
   if (smoothMonths > 0) {
     loadStartDate = loadStartDate.advance(-smoothMonths, 'month');
@@ -1259,6 +1317,9 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     if (mwOptions.enabled) {
       col = movingWindowSmooth(col, mwOptions.window, mwOptions.method);
     }
+    if (harmonicOptions.enabled) {
+      col = harmonicSmoothing(col, harmonicOptions.numHarmonics);
+    }
     return col.filterDate(startDate, endDate).sort('system:time_start');
   }
 
@@ -1302,6 +1363,9 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     }
     if (mwOptions.enabled) {
       col = movingWindowSmooth(col, mwOptions.window, mwOptions.method);
+    }
+    if (harmonicOptions.enabled) {
+      col = harmonicSmoothing(col, harmonicOptions.numHarmonics);
     }
     return col.filterDate(startDate, endDate).sort('system:time_start');
   }
@@ -1366,6 +1430,10 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
 
   if (mwOptions.enabled) {
     col = movingWindowSmooth(col, mwOptions.window, mwOptions.method);
+  }
+
+  if (harmonicOptions.enabled) {
+    col = harmonicSmoothing(col, harmonicOptions.numHarmonics);
   }
 
   return col.filterDate(startDate, endDate)
@@ -1605,6 +1673,7 @@ var applyQAMask = true;  // Enable science-grade QA / cloud masking by default
 var applyGapFill = false; // Optional temporal interpolation of masked pixels
 var applySmoothing = false; // Experimental Whittaker smoother (off by default)
 var applyMovingWindow = false; // Moving-window median/mean smoother (off by default)
+var applyHarmonic = false;    // Harmonic (Fourier) smoother (off by default)
 
 // --- Styles ---
 var S = {
@@ -2052,6 +2121,7 @@ var mainPanel = ui.Panel({
     gapFillCheckbox, gapFillControls, gapFillInfo,
     smoothCheckbox, smoothControls, smoothInfo,
     mwCheckbox, mwControls, mwInfo,
+    harmonicCheckbox, harmonicControls, harmonicInfo,
     smoothBufferPanel, smoothBufferInfo,
     calcButton, statusLabel,
     infoToggle, infoContent
@@ -2128,7 +2198,7 @@ gapFillCheckbox.onChange(function(checked) {
   gapFillInfo.style().set('shown', checked);
 });
 
-// --- Whittaker Smoother Toggle (mutually exclusive with moving-window) ---
+// --- Whittaker Smoother Toggle (mutually exclusive with moving-window and harmonic) ---
 smoothCheckbox.onChange(function(checked) {
   applySmoothing = checked;
   smoothControls.style().set('shown', checked);
@@ -2140,10 +2210,14 @@ smoothCheckbox.onChange(function(checked) {
     applyMovingWindow = false;
     mwControls.style().set('shown', false);
     mwInfo.style().set('shown', false);
+    harmonicCheckbox.setValue(false);
+    applyHarmonic = false;
+    harmonicControls.style().set('shown', false);
+    harmonicInfo.style().set('shown', false);
   }
 });
 
-// --- Moving-Window Smoother Toggle (mutually exclusive with Whittaker) ---
+// --- Moving-Window Smoother Toggle (mutually exclusive with Whittaker and harmonic) ---
 mwCheckbox.onChange(function(checked) {
   applyMovingWindow = checked;
   mwControls.style().set('shown', checked);
@@ -2155,6 +2229,31 @@ mwCheckbox.onChange(function(checked) {
     applySmoothing = false;
     smoothControls.style().set('shown', false);
     smoothInfo.style().set('shown', false);
+    harmonicCheckbox.setValue(false);
+    applyHarmonic = false;
+    harmonicControls.style().set('shown', false);
+    harmonicInfo.style().set('shown', false);
+  }
+});
+
+// --- Harmonic Smoother Toggle (mutually exclusive with Whittaker and moving-window) ---
+harmonicCheckbox.onChange(function(checked) {
+  applyHarmonic = checked;
+  harmonicControls.style().set('shown', checked);
+  harmonicInfo.style().set('shown', checked);
+  smoothBufferPanel.style().set('shown', checked);
+  smoothBufferInfo.style().set('shown', checked);
+  if (checked) {
+    smoothCheckbox.setValue(false);
+    applySmoothing = false;
+    smoothControls.style().set('shown', false);
+    smoothInfo.style().set('shown', false);
+    mwCheckbox.setValue(false);
+    applyMovingWindow = false;
+    mwControls.style().set('shown', false);
+    mwInfo.style().set('shown', false);
+    // Harmonic benefits from a longer edge buffer for better parameter estimation
+    smoothBufferInput.setValue('6');
   }
 });
 
@@ -2273,6 +2372,7 @@ productSelect.onChange(function(productKey) {
   gapFillCheckbox.setDisabled(isSAR);
   smoothCheckbox.setDisabled(isSAR);
   mwCheckbox.setDisabled(isSAR);
+  harmonicCheckbox.setDisabled(isSAR);
   if (isSAR) {
     qaMaskCheckbox.setValue(false);
     applyQAMask = false;
@@ -2288,6 +2388,10 @@ productSelect.onChange(function(productKey) {
     applyMovingWindow = false;
     mwControls.style().set('shown', false);
     mwInfo.style().set('shown', false);
+    harmonicCheckbox.setValue(false);
+    applyHarmonic = false;
+    harmonicControls.style().set('shown', false);
+    harmonicInfo.style().set('shown', false);
     smoothBufferPanel.style().set('shown', false);
     smoothBufferInfo.style().set('shown', false);
   }
@@ -2351,7 +2455,7 @@ function getGapFillOptions() {
 }
 
 function getBufferMonths() {
-  var isSmoothingActive = smoothCheckbox.getValue() || mwCheckbox.getValue();
+  var isSmoothingActive = smoothCheckbox.getValue() || mwCheckbox.getValue() || harmonicCheckbox.getValue();
   if (!isSmoothingActive) return {months: 0, suffix: ''};
   var text = smoothBufferInput.getValue().trim();
   if (!/^\d+$/.test(text)) {
@@ -2407,6 +2511,29 @@ function getMovingWindowOptions() {
     window: windowSize,
     bufferMonths: bufOpts.months,
     suffix: '_MW' + methodCode + windowSize + bufOpts.suffix
+  };
+}
+
+function getHarmonicOptions() {
+  applyHarmonic = harmonicCheckbox.getValue();
+  if (!applyHarmonic) {
+    return {enabled: false, numHarmonics: 2, bufferMonths: 0, suffix: ''};
+  }
+  var numText = harmonicNumInput.getValue().trim();
+  if (!/^\d+$/.test(numText)) {
+    return {error: 'ERROR: Number of harmonics must be 1, 2, or 3.'};
+  }
+  var numHarmonics = parseInt(numText, 10);
+  if (numHarmonics < 1 || numHarmonics > 3) {
+    return {error: 'ERROR: Number of harmonics must be 1, 2, or 3.'};
+  }
+  var bufOpts = getBufferMonths();
+  if (bufOpts.error) return {error: bufOpts.error};
+  return {
+    enabled: true,
+    numHarmonics: numHarmonics,
+    bufferMonths: bufOpts.months,
+    suffix: '_HS' + numHarmonics + bufOpts.suffix
   };
 }
 
@@ -2485,6 +2612,13 @@ calcButton.onClick(function() {
     return;
   }
 
+  var harmonicOptions = getHarmonicOptions();
+  if (harmonicOptions.error) {
+    statusLabel.style().set('color', 'red');
+    statusLabel.setValue(harmonicOptions.error);
+    return;
+  }
+
   // Parse export settings
   var crs = crsInput.getValue().trim() || 'EPSG:4326';
   var scale = parseInt(scaleInput.getValue(), 10) || PRODUCTS[productKey].resolution;
@@ -2509,6 +2643,9 @@ calcButton.onClick(function() {
   }
   if (mwOptions.enabled) {
     prepMsg += '\nMoving-window smoother: ' + mwOptions.method + ', window ' + mwOptions.window;
+  }
+  if (harmonicOptions.enabled) {
+    prepMsg += '\nHarmonic smoother: ' + harmonicOptions.numHarmonics + ' harmonic(s)';
   }
   if (exportOptions.mode === 'compact') {
     prepMsg += '\nCompact integer export enabled. Filenames include integer type and divisor.';
@@ -2538,7 +2675,7 @@ calcButton.onClick(function() {
 
     for (var v = 0; v < selectedVars.length; v++) {
       var varName = selectedVars[v];
-      var imgCol = loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions, mwOptions);
+      var imgCol = loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions, mwOptions, harmonicOptions);
 
       // Per-variable resolution override (e.g. Sentinel-2: 10m for NDVI/EVI/SAVI, 20m for rest)
       var varCfg = PRODUCTS[productKey].variables[varName];
@@ -2558,7 +2695,7 @@ calcButton.onClick(function() {
 
         if (result) {
           var desc = productShort + '_' + varName + '_' + statName + '_' + year +
-            gapFillOptions.suffix + smoothingOptions.suffix + mwOptions.suffix;
+            gapFillOptions.suffix + smoothingOptions.suffix + mwOptions.suffix + harmonicOptions.suffix;
           createExportTask(result, desc, aoi, crs, effectiveScale, folder, maxPx,
             productKey, varName, statName, exportOptions);
           exportCount++;
@@ -2591,7 +2728,7 @@ calcButton.onClick(function() {
 
   statusLabel.style().set('color', '#27ae60');
   var exportPattern = productShort + '_{Variable}_{Statistic}_{Year}' +
-    gapFillOptions.suffix + smoothingOptions.suffix + mwOptions.suffix;
+    gapFillOptions.suffix + smoothingOptions.suffix + mwOptions.suffix + harmonicOptions.suffix;
   if (exportOptions.mode === 'compact') {
     exportPattern += '_{i16x10000|i32x10000|i16x1}';
   }
