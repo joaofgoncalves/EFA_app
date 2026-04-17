@@ -1102,13 +1102,46 @@ function whittakerSmoothing(imageCollection, lambda) {
     .sort('system:time_start');
 }
 
+// Moving-window smoother: replaces each pixel value with the median or mean
+// of its temporal neighbours within a centered window.
+// Window size is in image count (must be odd >= 3).
+// Masked pixels are set to 0 before reducing; original mask is restored after.
+function movingWindowSmooth(imgCol, windowSize, method) {
+  var halfWindow = Math.floor(windowSize / 2);
+  var sorted = ee.ImageCollection(imgCol).sort('system:time_start');
+  var count = sorted.size();
+  var imgList = sorted.toList(count);
+  var indexes = ee.List(ee.Algorithms.If(
+    count.gt(0),
+    ee.List.sequence(0, count.subtract(1)),
+    ee.List([])
+  ));
+
+  var smoothed = indexes.map(function(index) {
+    index = ee.Number(index);
+    var start = index.subtract(halfWindow).max(0);
+    var end = index.add(halfWindow).add(1).min(count);
+    var localCol = ee.ImageCollection.fromImages(imgList.slice(start, end))
+      .map(function(img) { return img.unmask(0); });
+    var result = (method === 'Mean') ? localCol.mean() : localCol.median();
+    var orig = ee.Image(imgList.get(index));
+    // Restore the original mask so downstream stats ignore truly absent pixels
+    return result.updateMask(orig.mask())
+      .copyProperties(orig, orig.propertyNames());
+  });
+
+  return ee.ImageCollection.fromImages(smoothed)
+    .sort('system:time_start');
+}
+
 // Load, filter, mask, and process a collection for one variable and year.
 // Handles both MODIS (single-collection) and Landsat Harmonized (multi-mission merge).
-function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions) {
+function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions, mwOptions) {
   var product = PRODUCTS[productKey];
   var varConfig = product.variables[varName];
   gapFillOptions = gapFillOptions || {enabled: false};
   smoothingOptions = smoothingOptions || {enabled: false};
+  mwOptions = mwOptions || {enabled: false};
 
   var startDate = ee.Date.fromYMD(year, 1, 1);
   var endDate = startDate.advance(1, 'year');
@@ -1119,6 +1152,11 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     var bufferDays = getTemporalStepDays(product) * Math.floor(gapFillOptions.window / 2);
     loadStartDate = startDate.advance(-bufferDays, 'day');
     loadEndDate = endDate.advance(bufferDays, 'day');
+  }
+  if (mwOptions.enabled) {
+    var mwBufferDays = getTemporalStepDays(product) * Math.floor(mwOptions.window / 2);
+    loadStartDate = loadStartDate.advance(-mwBufferDays, 'day');
+    loadEndDate = loadEndDate.advance(mwBufferDays, 'day');
   }
 
   // ---- Landsat Harmonized branch ----
@@ -1195,6 +1233,9 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     if (smoothingOptions.enabled) {
       col = whittakerSmoothing(col, smoothingOptions.lambda);
     }
+    if (mwOptions.enabled) {
+      col = movingWindowSmooth(col, mwOptions.window, mwOptions.method);
+    }
     return col.filterDate(startDate, endDate).sort('system:time_start');
   }
 
@@ -1235,6 +1276,9 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     }
     if (smoothingOptions.enabled) {
       col = whittakerSmoothing(col, smoothingOptions.lambda);
+    }
+    if (mwOptions.enabled) {
+      col = movingWindowSmooth(col, mwOptions.window, mwOptions.method);
     }
     return col.filterDate(startDate, endDate).sort('system:time_start');
   }
@@ -1295,6 +1339,10 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
 
   if (smoothingOptions.enabled) {
     col = whittakerSmoothing(col, smoothingOptions.lambda);
+  }
+
+  if (mwOptions.enabled) {
+    col = movingWindowSmooth(col, mwOptions.window, mwOptions.method);
   }
 
   return col.filterDate(startDate, endDate)
@@ -1533,6 +1581,7 @@ var currentAssetAOI = null;
 var applyQAMask = true;  // Enable science-grade QA / cloud masking by default
 var applyGapFill = false; // Optional temporal interpolation of masked pixels
 var applySmoothing = false; // Experimental Whittaker smoother (off by default)
+var applyMovingWindow = false; // Moving-window median/mean smoother (off by default)
 
 // --- Styles ---
 var S = {
@@ -1823,6 +1872,40 @@ var smoothInfo = ui.Label(
    whiteSpace: 'pre-wrap', shown: false}
 );
 
+// ---- Moving-Window Smoother Toggle [experimental] ----
+var mwCheckbox = ui.Checkbox({
+  label: 'Apply Moving-Window Smoother [experimental]',
+  value: false,
+  style: {fontSize: '12px', margin: '6px 0 0 0'}
+});
+var mwMethodSelect = ui.Select({
+  items: ['Median', 'Mean'],
+  value: 'Median',
+  style: {stretch: 'horizontal', fontSize: '12px'}
+});
+var mwWindowInput = ui.Textbox({
+  value: '5',
+  placeholder: 'Odd integer >= 3 (e.g. 5)',
+  style: {stretch: 'horizontal', fontSize: '12px'}
+});
+var mwControls = ui.Panel({
+  widgets: [
+    makeRow('Method:', mwMethodSelect),
+    makeRow('Window size (images):', mwWindowInput)
+  ],
+  style: {shown: false, margin: '2px 0 0 12px'}
+});
+var mwInfo = ui.Label(
+  'WARNING: Experimental feature. Replaces each pixel value with the median/mean ' +
+  'of its temporal neighbours within a centered sliding window.\n' +
+  'Window size = number of images (must be odd). Larger window = smoother curve ' +
+  'but more temporal detail lost. Guidance: 3-5 light, 7-9 moderate, 11+ heavy.\n' +
+  'Recommendation: enable gap fill first to minimize the effect of masked pixels ' +
+  '(remaining masked values are set to 0 during smoothing, original mask is preserved).',
+  {fontSize: '10px', color: '#b35900', margin: '1px 0 4px 12px',
+   whiteSpace: 'pre-wrap', shown: false}
+);
+
 // ---- Calculate Button ----
 var calcButton = ui.Button({
   label: 'CALCULATE & EXPORT',
@@ -1886,6 +1969,7 @@ var mainPanel = ui.Panel({
     qaMaskCheckbox, qaMaskInfo,
     gapFillCheckbox, gapFillControls, gapFillInfo,
     smoothCheckbox, smoothControls, smoothInfo,
+    mwCheckbox, mwControls, mwInfo,
     calcButton, statusLabel,
     infoToggle, infoContent
   ],
@@ -1961,11 +2045,30 @@ gapFillCheckbox.onChange(function(checked) {
   gapFillInfo.style().set('shown', checked);
 });
 
-// --- Whittaker Smoother Toggle ---
+// --- Whittaker Smoother Toggle (mutually exclusive with moving-window) ---
 smoothCheckbox.onChange(function(checked) {
   applySmoothing = checked;
   smoothControls.style().set('shown', checked);
   smoothInfo.style().set('shown', checked);
+  if (checked) {
+    mwCheckbox.setValue(false);
+    applyMovingWindow = false;
+    mwControls.style().set('shown', false);
+    mwInfo.style().set('shown', false);
+  }
+});
+
+// --- Moving-Window Smoother Toggle (mutually exclusive with Whittaker) ---
+mwCheckbox.onChange(function(checked) {
+  applyMovingWindow = checked;
+  mwControls.style().set('shown', checked);
+  mwInfo.style().set('shown', checked);
+  if (checked) {
+    smoothCheckbox.setValue(false);
+    applySmoothing = false;
+    smoothControls.style().set('shown', false);
+    smoothInfo.style().set('shown', false);
+  }
 });
 
 // --- AOI Method Toggle ---
@@ -2082,6 +2185,7 @@ productSelect.onChange(function(productKey) {
   qaMaskCheckbox.setDisabled(isSAR);
   gapFillCheckbox.setDisabled(isSAR);
   smoothCheckbox.setDisabled(isSAR);
+  mwCheckbox.setDisabled(isSAR);
   if (isSAR) {
     qaMaskCheckbox.setValue(false);
     applyQAMask = false;
@@ -2093,6 +2197,10 @@ productSelect.onChange(function(productKey) {
     applySmoothing = false;
     smoothControls.style().set('shown', false);
     smoothInfo.style().set('shown', false);
+    mwCheckbox.setValue(false);
+    applyMovingWindow = false;
+    mwControls.style().set('shown', false);
+    mwInfo.style().set('shown', false);
   }
 });
 
@@ -2173,6 +2281,29 @@ function getSmoothingOptions() {
   };
 }
 
+function getMovingWindowOptions() {
+  applyMovingWindow = mwCheckbox.getValue();
+  if (!applyMovingWindow) {
+    return {enabled: false, window: 5, method: 'Median', suffix: ''};
+  }
+  var method = mwMethodSelect.getValue() || 'Median';
+  var windowText = mwWindowInput.getValue().trim();
+  if (!/^\d+$/.test(windowText)) {
+    return {error: 'ERROR: Moving-window size must be an odd integer >= 3.'};
+  }
+  var windowSize = parseInt(windowText, 10);
+  if (windowSize < 3 || windowSize % 2 === 0) {
+    return {error: 'ERROR: Moving-window size must be an odd integer >= 3.'};
+  }
+  var methodCode = (method === 'Median') ? 'm' : 'M';
+  return {
+    enabled: true,
+    method: method,
+    window: windowSize,
+    suffix: '_MW' + methodCode + windowSize
+  };
+}
+
 function getExportOptions() {
   var encoding = exportEncodingSelect.getValue() || EXPORT_ENCODING_FLOAT;
   return {
@@ -2241,6 +2372,13 @@ calcButton.onClick(function() {
     return;
   }
 
+  var mwOptions = getMovingWindowOptions();
+  if (mwOptions.error) {
+    statusLabel.style().set('color', 'red');
+    statusLabel.setValue(mwOptions.error);
+    return;
+  }
+
   // Parse export settings
   var crs = crsInput.getValue().trim() || 'EPSG:4326';
   var scale = parseInt(scaleInput.getValue(), 10) || PRODUCTS[productKey].resolution;
@@ -2262,6 +2400,9 @@ calcButton.onClick(function() {
   }
   if (smoothingOptions.enabled) {
     prepMsg += '\nWhittaker smoother: lambda ' + smoothingOptions.lambda;
+  }
+  if (mwOptions.enabled) {
+    prepMsg += '\nMoving-window smoother: ' + mwOptions.method + ', window ' + mwOptions.window;
   }
   if (exportOptions.mode === 'compact') {
     prepMsg += '\nCompact integer export enabled. Filenames include integer type and divisor.';
@@ -2291,7 +2432,7 @@ calcButton.onClick(function() {
 
     for (var v = 0; v < selectedVars.length; v++) {
       var varName = selectedVars[v];
-      var imgCol = loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions);
+      var imgCol = loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions, mwOptions);
 
       // Per-variable resolution override (e.g. Sentinel-2: 10m for NDVI/EVI/SAVI, 20m for rest)
       var varCfg = PRODUCTS[productKey].variables[varName];
@@ -2311,7 +2452,7 @@ calcButton.onClick(function() {
 
         if (result) {
           var desc = productShort + '_' + varName + '_' + statName + '_' + year +
-            gapFillOptions.suffix + smoothingOptions.suffix;
+            gapFillOptions.suffix + smoothingOptions.suffix + mwOptions.suffix;
           createExportTask(result, desc, aoi, crs, effectiveScale, folder, maxPx,
             productKey, varName, statName, exportOptions);
           exportCount++;
@@ -2344,7 +2485,7 @@ calcButton.onClick(function() {
 
   statusLabel.style().set('color', '#27ae60');
   var exportPattern = productShort + '_{Variable}_{Statistic}_{Year}' +
-    gapFillOptions.suffix + smoothingOptions.suffix;
+    gapFillOptions.suffix + smoothingOptions.suffix + mwOptions.suffix;
   if (exportOptions.mode === 'compact') {
     exportPattern += '_{i16x10000|i32x10000|i16x1}';
   }
