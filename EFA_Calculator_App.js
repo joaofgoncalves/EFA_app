@@ -34,7 +34,7 @@
  *   Mandal et al. (2020) - DpRVI for Sentinel-1 SAR (Remote Sens. Environ. 247:111954)
  *   Mitchard et al. (2012) - RFDI forest degradation index (Biogeosciences 9:179-191)
  *
- * Version: v0.7 (2026-04-17)
+ * Version: v1.0 (2026-04-17)
  * ============================================================================
  */
 
@@ -322,11 +322,46 @@ function LT8_TCT_W(img) {
     .rename('TCTW').set('system:time_start', img.get('system:time_start'));
 }
 
-// Lookup table: variable name → per-mission TCT functions
+// Lookup table: variable name → per-mission TCT functions.
+// lt4 shares Crist (1985) TM coefficients with lt5; lt9 shares Baig (2014) OLI with lt8.
 var LT_TCT_FNS = {
-  'TCT_Brightness': {lt5: LT5_TCT_B, lt7: LT7_TCT_B, lt8: LT8_TCT_B},
-  'TCT_Greenness':  {lt5: LT5_TCT_G, lt7: LT7_TCT_G, lt8: LT8_TCT_G},
-  'TCT_Wetness':    {lt5: LT5_TCT_W, lt7: LT7_TCT_W, lt8: LT8_TCT_W}
+  'TCT_Brightness': {lt4: LT5_TCT_B, lt5: LT5_TCT_B, lt7: LT7_TCT_B, lt8: LT8_TCT_B, lt9: LT8_TCT_B},
+  'TCT_Greenness':  {lt4: LT5_TCT_G, lt5: LT5_TCT_G, lt7: LT7_TCT_G, lt8: LT8_TCT_G, lt9: LT8_TCT_G},
+  'TCT_Wetness':    {lt4: LT5_TCT_W, lt5: LT5_TCT_W, lt7: LT7_TCT_W, lt8: LT8_TCT_W, lt9: LT8_TCT_W}
+};
+
+// Per-mission config for the landsat_single pipeline branch.
+var LANDSAT_SINGLE_CONFIG = {
+  'LT04': {
+    renameFn: renameLT57,
+    tctKey:   'lt4',
+    label:    'LT4 TM: 1982–1993',
+    tctNote:  'TCT: Crist (1985) TM coefficients.'
+  },
+  'LT05': {
+    renameFn: renameLT57,
+    tctKey:   'lt5',
+    label:    'LT5 TM: 1984–2012',
+    tctNote:  'TCT: Crist (1985) TM coefficients.'
+  },
+  'LE07': {
+    renameFn: renameLT57,
+    tctKey:   'lt7',
+    label:    'LT7 ETM+: 1999–2024  ·  Note: SLC scan-line gaps from May 2003 onward.',
+    tctNote:  'TCT: Huang et al. (2002) ETM+ coefficients.'
+  },
+  'LC08': {
+    renameFn: renameLT8,
+    tctKey:   'lt8',
+    label:    'LT8 OLI/TIRS: 2013–present',
+    tctNote:  'TCT: Baig et al. (2014) OLI coefficients.'
+  },
+  'LC09': {
+    renameFn: renameLT8,
+    tctKey:   'lt9',
+    label:    'LT9 OLI-2/TIRS-2: 2021–present',
+    tctNote:  'TCT: Baig et al. (2014) OLI coefficients (applied to OLI-2).'
+  }
 };
 
 
@@ -843,6 +878,110 @@ var PRODUCTS = {
     }
   },
 
+  // ---- Individual Landsat missions (C02 T1 L2, 30m) ----
+  // Each uses the landsat_single branch: single collection, no cross-sensor
+  // harmonization. fmask always applied. TCT uses mission-specific coefficients.
+  // Spectral indices computed on native reflectance.
+  'Landsat 4 TM (30m, 1982–1993)': {
+    type: 'landsat_single',
+    mission: 'LT04',
+    geeId: 'LANDSAT/LT04/C02/T1_L2',
+    resolution: 30,
+    temporal: '16-day',
+    qaMask: null,
+    variables: {
+      'NDVI':           {band: 'NDVI'},
+      'EVI':            {band: 'EVI'},
+      'SAVI':           {band: 'SAVI'},
+      'NBR':            {band: 'NBR'},
+      'NDWI':           {band: 'NDWI'},
+      'TCT_Brightness': {band: 'TCTB'},
+      'TCT_Greenness':  {band: 'TCTG'},
+      'TCT_Wetness':    {band: 'TCTW'},
+      'LST':            {band: 'LST'}
+    }
+  },
+
+  'Landsat 5 TM (30m, 1984–2012)': {
+    type: 'landsat_single',
+    mission: 'LT05',
+    geeId: 'LANDSAT/LT05/C02/T1_L2',
+    resolution: 30,
+    temporal: '16-day',
+    qaMask: null,
+    variables: {
+      'NDVI':           {band: 'NDVI'},
+      'EVI':            {band: 'EVI'},
+      'SAVI':           {band: 'SAVI'},
+      'NBR':            {band: 'NBR'},
+      'NDWI':           {band: 'NDWI'},
+      'TCT_Brightness': {band: 'TCTB'},
+      'TCT_Greenness':  {band: 'TCTG'},
+      'TCT_Wetness':    {band: 'TCTW'},
+      'LST':            {band: 'LST'}
+    }
+  },
+
+  'Landsat 7 ETM+ (30m, 1999–2024)': {
+    type: 'landsat_single',
+    mission: 'LE07',
+    geeId: 'LANDSAT/LE07/C02/T1_L2',
+    resolution: 30,
+    temporal: '16-day',
+    qaMask: null,
+    variables: {
+      'NDVI':           {band: 'NDVI'},
+      'EVI':            {band: 'EVI'},
+      'SAVI':           {band: 'SAVI'},
+      'NBR':            {band: 'NBR'},
+      'NDWI':           {band: 'NDWI'},
+      'TCT_Brightness': {band: 'TCTB'},
+      'TCT_Greenness':  {band: 'TCTG'},
+      'TCT_Wetness':    {band: 'TCTW'},
+      'LST':            {band: 'LST'}
+    }
+  },
+
+  'Landsat 8 OLI (30m, 2013+)': {
+    type: 'landsat_single',
+    mission: 'LC08',
+    geeId: 'LANDSAT/LC08/C02/T1_L2',
+    resolution: 30,
+    temporal: '16-day',
+    qaMask: null,
+    variables: {
+      'NDVI':           {band: 'NDVI'},
+      'EVI':            {band: 'EVI'},
+      'SAVI':           {band: 'SAVI'},
+      'NBR':            {band: 'NBR'},
+      'NDWI':           {band: 'NDWI'},
+      'TCT_Brightness': {band: 'TCTB'},
+      'TCT_Greenness':  {band: 'TCTG'},
+      'TCT_Wetness':    {band: 'TCTW'},
+      'LST':            {band: 'LST'}
+    }
+  },
+
+  'Landsat 9 OLI-2 (30m, 2021+)': {
+    type: 'landsat_single',
+    mission: 'LC09',
+    geeId: 'LANDSAT/LC09/C02/T1_L2',
+    resolution: 30,
+    temporal: '16-day',
+    qaMask: null,
+    variables: {
+      'NDVI':           {band: 'NDVI'},
+      'EVI':            {band: 'EVI'},
+      'SAVI':           {band: 'SAVI'},
+      'NBR':            {band: 'NBR'},
+      'NDWI':           {band: 'NDWI'},
+      'TCT_Brightness': {band: 'TCTB'},
+      'TCT_Greenness':  {band: 'TCTG'},
+      'TCT_Wetness':    {band: 'TCTW'},
+      'LST':            {band: 'LST'}
+    }
+  },
+
   // ---- Sentinel-2 SR Harmonized (S2A + S2B, Level-2A, 10/20m) ----
   // Collection loading is handled by a dedicated branch in loadAndProcessCollection.
   // SCL cloud masking is always applied; no cross-sensor harmonization needed.
@@ -898,7 +1037,12 @@ var MISSION_GROUPS = {
                  'MOD13Q1 (250m, 16-day)', 'MOD17A2H (500m, 8-day)',
                  'MCD43A1 (500m, Daily)',  'MOD16A2 (500m, 8-day)',
                  'MCD15A3H (500m, 4-day)'],
-  'Landsat':    ['Landsat Harmonized (30m, LT5/7/8)'],
+  'Landsat':    ['Landsat Harmonized (30m, LT5/7/8)',
+                 'Landsat 4 TM (30m, 1982–1993)',
+                 'Landsat 5 TM (30m, 1984–2012)',
+                 'Landsat 7 ETM+ (30m, 1999–2024)',
+                 'Landsat 8 OLI (30m, 2013+)',
+                 'Landsat 9 OLI-2 (30m, 2021+)'],
   'Sentinel-2': ['Sentinel-2 SR (10/20m, 5-day)'],
   'Sentinel-1': ['Sentinel-1 SAR (10m, ~12-day)']
 };
@@ -922,6 +1066,11 @@ var PRODUCT_YEAR_RANGES = {
     {label: 'LT7 era (1999–2023)', start: 1999, end: 2023},
     {label: 'LT8 era (2013+)',     start: 2013}
   ],
+  'Landsat 4 TM (30m, 1982–1993)':   [{label: 'LT4 range (1982–1993)', start: 1982, end: 1993}],
+  'Landsat 5 TM (30m, 1984–2012)':   [{label: 'LT5 range (1984–2012)', start: 1984, end: 2012}],
+  'Landsat 7 ETM+ (30m, 1999–2024)': [{label: 'LT7 range (1999–2023)', start: 1999, end: 2023}],
+  'Landsat 8 OLI (30m, 2013+)':      [{label: 'LT8 range (2013+)',     start: 2013}],
+  'Landsat 9 OLI-2 (30m, 2021+)':    [{label: 'LT9 range (2021+)',     start: 2021}],
   'Sentinel-2 SR (10/20m, 5-day)':     [{label: 'Sentinel-2 range (2017+)', start: 2017}],
   'Sentinel-1 SAR (10m, ~12-day)':     [{label: 'Sentinel-1 range (2015+)', start: 2015}]
 };
@@ -1340,6 +1489,66 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
       col = lt8raw.map(mkIdx8)
         .merge(lt7raw.map(mkIdx57))
         .merge(lt5raw.map(mkIdx57));
+    }
+
+    col = col.sort('system:time_start');
+    if (gapFillOptions.enabled) {
+      col = gapFillTemporalReducer(col, gapFillOptions.window, gapFillOptions.method);
+    }
+    if (smoothingOptions.enabled) {
+      col = whittakerSmoothing(col, smoothingOptions.lambda);
+    }
+    if (mwOptions.enabled) {
+      col = movingWindowSmooth(col, mwOptions.window, mwOptions.method);
+    }
+    if (harmonicOptions.enabled) {
+      col = harmonicSmoothing(col, harmonicOptions.numHarmonics);
+    }
+    return col.filterDate(startDate, endDate).sort('system:time_start');
+  }
+
+  // ---- Landsat Single-Mission branch ----
+  // Single collection, fmask applied, no cross-sensor harmonization.
+  // TCT uses mission-specific coefficients via LANDSAT_SINGLE_CONFIG.
+  // Spectral indices computed on native (unharmonized) reflectance.
+  if (product.type === 'landsat_single') {
+    var ltsCfg = LANDSAT_SINGLE_CONFIG[product.mission];
+    var ltsRenameFn = ltsCfg.renameFn;
+    var ltsTctKey   = ltsCfg.tctKey;
+    var ltsFilter = ee.Filter.and(
+      ee.Filter.bounds(aoi),
+      ee.Filter.date(loadStartDate, loadEndDate)
+    );
+    var ltsRaw = ee.ImageCollection(product.geeId).filter(ltsFilter);
+
+    var col;
+    if (varName === 'LST') {
+      col = ltsRaw.map(function(img) {
+        var orig = img;
+        img = applyLandsatScaleFactors(img);
+        img = ltsRenameFn(img);
+        img = fmaskLandsat(img);
+        return ee.Image(LT_LST(img).copyProperties(orig, orig.propertyNames()));
+      });
+    } else if (varName === 'TCT_Brightness' || varName === 'TCT_Greenness' ||
+               varName === 'TCT_Wetness') {
+      var ltsTctFn = LT_TCT_FNS[varName][ltsTctKey];
+      col = ltsRaw.map(function(img) {
+        var orig = img;
+        img = applyLandsatScaleFactors(img);
+        img = ltsRenameFn(img);
+        img = fmaskLandsat(img);
+        return ee.Image(ltsTctFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
+      });
+    } else {
+      var ltsIdxFn = LT_INDEX_FNS[varName];
+      col = ltsRaw.map(function(img) {
+        var orig = img;
+        img = applyLandsatScaleFactors(img);
+        img = ltsRenameFn(img);
+        img = fmaskLandsat(img);
+        return ee.Image(ltsIdxFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
+      });
     }
 
     col = col.sort('system:time_start');
@@ -1795,7 +2004,7 @@ var yearCol2 = ui.Panel({layout: ui.Panel.Layout.flow('vertical'), style: yearCo
 var yearCol3 = ui.Panel({layout: ui.Panel.Layout.flow('vertical'), style: yearColStyle});
 var yearCols = [yearCol1, yearCol2, yearCol3];
 var yearList = [];
-for (var y = 1984; y <= 2026; y++) yearList.push(y);
+for (var y = 1982; y <= 2026; y++) yearList.push(y);
 var yearPerCol = Math.ceil(yearList.length / 3);
 for (var yi = 0; yi < yearList.length; yi++) {
   var ycb = ui.Checkbox({label: String(yearList[yi]), value: false, style: yearCbStyle});
@@ -2430,10 +2639,17 @@ productSelect.onChange(function(productKey) {
 
   var infoText;
   if (product.type === 'landsat') {
-    infoText = product.resolution + 'm | scenes | ' + varNames.length + ' variable(s)' +
-      ' | fmask cloud masking always applied\n' +
-      '  LT5: 1984–2013 · LT7: 1999–present · LT8: 2013–present\n' +
+    infoText = product.resolution + 'm | ' + product.temporal + ' | ' + varNames.length +
+      ' variable(s) | fmask cloud masking always applied\n' +
+      '  LT5: 1984–2012 · LT7: 1999–2023 · LT8: 2013–present\n' +
       '  TCT uses mission-specific coefficients; reflectance indices harmonized to OLI.';
+  } else if (product.type === 'landsat_single') {
+    var ltInfoCfg = LANDSAT_SINGLE_CONFIG[product.mission];
+    infoText = product.resolution + 'm | ' + product.temporal + ' | ' + varNames.length +
+      ' variable(s) | fmask cloud masking always applied\n' +
+      '  ' + ltInfoCfg.label + '\n' +
+      '  ' + ltInfoCfg.tctNote + '\n' +
+      '  Spectral indices on native reflectance (no cross-sensor harmonization).';
   } else if (product.type === 'sentinel2') {
     infoText = '10/20m | ' + product.temporal + ' | ' + varNames.length +
       ' variable(s) | SCL cloud masking always applied\n' +
@@ -2509,7 +2725,7 @@ function getSelectedStatistics() {
 
 function getSelectedYears() {
   var sel = [];
-  for (var y = 1984; y <= 2026; y++) {
+  for (var y = 1982; y <= 2026; y++) {
     if (yearCheckboxes[String(y)].getValue()) sel.push(y);
   }
   return sel;
