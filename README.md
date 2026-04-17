@@ -34,7 +34,7 @@ Not every statistic is equally meaningful for every variable. For example, the c
 7. Select one or more annual statistics.
 8. Set export options: CRS, scale (i.e., spatial resolution), Google Drive folder, maximum number of pixels, and raster bit depth/encoding.
 9. Leave the QA/cloud mask enabled unless you have a specific reason to inspect unmasked MODIS values.
-10. Optionally enable temporal gap filling and choose a reducer and window size.
+10. Optionally enable temporal gap filling and/or one of the time-series smoothers.
 11. Click **CALCULATE & EXPORT**.
 12. Check the preview layer added to the map.
 13. Open the Earth Engine **Tasks** tab and start the generated export tasks.
@@ -65,6 +65,10 @@ Large year ranges, daily products, large AOIs, Landsat exports, or many variable
 | Encoding | `Float32 (original)` | Output numeric encoding: original float values or compact integer values. |
 | Apply QA / Cloud Mask | On | Applies MODIS product QA masks. Landsat fmask is always applied in the Landsat branch. |
 | Apply Temporal Gap Fill | Off | Fills masked pixels from neighboring dates before annual statistics are computed. |
+| Apply Whittaker Smoother | Off | Penalized least-squares smoother applied to the time series before annual aggregation. |
+| Apply Moving-Window Smoother | Off | Replaces each observation with the median or mean of its temporal neighbors. |
+| Apply Harmonic Smoother | Off | Fits a Fourier model to the time series and replaces each observation with the modelled value. |
+| Buffer months | 3 (6 for Harmonic) | Extra months loaded before Jan 1 and after Dec 31 to reduce smoother edge effects. Stripped before annual aggregation. |
 
 ## Area Of Interest options
 
@@ -346,6 +350,72 @@ For example:
 MOD13Q1_NDVI_Mean_2020_GFMedianW5
 ```
 
+## Time-series smoothing
+
+Three experimental smoothers can be applied to the annual time series after masking and variable calculation but before annual statistics are computed. Only one smoother can be active at a time. Smoothing is **not available for Sentinel-1 SAR**; the controls are automatically disabled when that product is selected.
+
+The processing order when multiple options are combined is: gap fill → Whittaker (or Moving-Window, or Harmonic) → filter to calendar year → annual statistics.
+
+### Whittaker smoother
+
+Applies a penalized least-squares fit with 3rd-order differences to the full annual time series. The smoothed curve minimizes the sum of squared residuals plus a roughness penalty controlled by **Lambda**.
+
+| Option | Values | Meaning |
+| --- | --- | --- |
+| Lambda | Positive number | Smoothing strength. 1–5: light; 10: moderate; 50–100: heavy. |
+
+Masked pixels are temporarily set to zero before smoothing, so enabling gap fill first is recommended to avoid pulling the smooth curve toward zero in cloudy periods.
+
+Filenames include `_WS{lambda}`.
+
+### Moving-window smoother
+
+Replaces each pixel value with the median or mean of its temporal neighbors within a centered sliding window. Window size is counted in images, not calendar days.
+
+| Option | Values | Meaning |
+| --- | --- | --- |
+| Method | `Median`, `Mean` | Median is more robust to outliers; mean is smoother. |
+| Window size | Odd integer `>= 3` | Number of images in the centered window. 3–5: light; 7–9: moderate; 11+: heavy. |
+
+The original mask is restored after smoothing, so genuinely missing observations remain absent from annual statistics.
+
+Filenames include `_MW{m|M}{window}` (`m` = Median, `M` = Mean).
+
+### Harmonic smoother
+
+Fits a Fourier model to the pixel time series using ordinary least squares and replaces every observation with the modelled value at its timestamp. The model is:
+
+```text
+y(t) = c0 + Σ[k=1..N] ( c_sin_k · sin(2πkt) + c_cos_k · cos(2πkt) )
+```
+
+where `t` is time in fractional years from the first observation in the loaded window and `N` is the number of harmonics.
+
+| Option | Values | Meaning |
+| --- | --- | --- |
+| Harmonics | `1`, `2`, or `3` | 1 = annual cycle only (3 params); 2 = + semi-annual (5 params); 3 = + tertiary (7 params). |
+
+Masked pixels are excluded from the OLS fit naturally. Pixels with no valid observations across the entire loaded window remain masked in the output. Because the output is a parametric fit rather than a smoothed observation, the harmonic smoother fills gaps and generates continuous annual curves even where cloudiness is high.
+
+Filenames include `_HS{N}`.
+
+### Edge buffer months
+
+All three smoothers can load extra data before January 1 and after December 31. Smoothing at the start and end of a year is affected by edge effects when only one-sided neighbors are available. Loading extra months on both sides gives the smoother bilateral context at the boundaries; the buffer is then stripped before annual statistics are computed.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| Buffer months | 3 (Whittaker, Moving-Window) / 6 (Harmonic) | Number of calendar months added before Jan 1 and after Dec 31 before smoothing. Set to 0 to disable. |
+
+The 6-month default for the harmonic smoother improves parameter estimation (intercept and harmonic amplitudes/phases) particularly when a full annual cycle is needed for stable OLS fitting.
+
+When buffer months are used, the filename includes `_B{N}`:
+
+```text
+MOD09A1_NDVI_Mean_2020_HS2_B6
+MOD13Q1_NDVI_Mean_2020_GFMedianW5_WS10_B3
+```
+
 ## Export options
 
 The app uses `Export.image.toDrive()` for every selected year-variable-statistic combination.
@@ -380,22 +450,24 @@ MCD43A1_Avg_Albedo_Median_2021
 Landsat_NBR_DOY_Max_2003
 ```
 
-If temporal gap filling is enabled, the gap-fill suffix is appended:
+Optional suffixes are appended in this order: gap fill, Whittaker, Moving-Window, Harmonic, compact encoding.
 
-```text
-{ProductShort}_{Variable}_{Statistic}_{Year}_GF{Method}W{Window}
-```
+| Active option | Suffix pattern | Example |
+| --- | --- | --- |
+| Gap fill | `_GF{Method}W{Window}` | `_GFMedianW5` |
+| Whittaker smoother | `_WS{lambda}` | `_WS10` |
+| Moving-window smoother | `_MW{m\|M}{window}` | `_MWm5` (Median), `_MWM7` (Mean) |
+| Harmonic smoother | `_HS{N}` | `_HS2` |
+| Buffer months (any smoother) | `_B{months}` appended to the smoother suffix | `_WS10_B3`, `_HS2_B6` |
+| Compact integer encoding | `_{i16\|i32}x{factor}` | `_i16x10000` |
 
-If compact integer encoding is enabled, an additional type/factor suffix is appended:
-
-```text
-{ProductShort}_{Variable}_{Statistic}_{Year}[_GF{Method}W{Window}]_{i16|i32}x{factor}
-```
-
-Example:
+Full examples:
 
 ```text
 MOD13Q1_NDVI_Mean_2020_GFMedianW5_i16x10000
+MOD09A1_NDVI_Mean_2020_WS10_B3
+MOD09A1_NDVI_Mean_2020_HS2_B6
+Sentinel2_NDVI_Mean_2021_MWm5_B3_i16x10000
 ```
 
 ### Float32 encoding
@@ -432,8 +504,11 @@ Compact mode is useful for storage and GIS interoperability, but Float32 is bett
 For each selected product, year, variable, and statistic, the app follows this order:
 
 1. Build the target date range from January 1 to January 1 of the next year.
-2. If gap filling is enabled, expand the loading date range on both sides using the product cadence and half the selected window size.
-3. Load the image collection and filter by date and AOI.
+2. Expand the loading window for any active options:
+   - Gap fill: extend by `floor(window/2) × product cadence days` on each side.
+   - Moving-window smoother: extend by `floor(window/2) × product cadence days` on each side.
+   - Any active smoother with buffer months enabled: extend by N calendar months on each side.
+3. Load the image collection filtered by the expanded date range and AOI.
 4. Apply QA/cloud masking:
    - MODIS/MCD: only when **Apply QA / Cloud Mask** is checked.
    - Landsat: fmask is always applied.
@@ -447,10 +522,11 @@ For each selected product, year, variable, and statistic, the app follows this o
    - Sentinel-1 path: use the dedicated SAR branch (dB-to-linear conversion as needed).
 6. Sort by `system:time_start`.
 7. Apply temporal gap filling if requested (Sentinel-1 SAR always bypasses this step).
-8. Filter back to the target calendar year.
-9. Compute the annual statistic.
-10. Create a Drive export task.
-11. Add the first result to the map as a preview layer.
+8. Apply the active smoother if requested (Whittaker, Moving-Window, or Harmonic). Sentinel-1 SAR always bypasses all smoothers.
+9. Filter back to the target calendar year (strips the edge buffer and any gap-fill/smoother buffer).
+10. Compute the annual statistic.
+11. Create a Drive export task.
+12. Add the first result to the map as a preview layer.
 
 ## Extending the app with your own variables
 
