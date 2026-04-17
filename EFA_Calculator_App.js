@@ -25,7 +25,7 @@
  *   Mandal et al. (2020) - DpRVI for Sentinel-1 SAR (Remote Sens. Environ. 247:111954)
  *   Mitchard et al. (2012) - RFDI forest degradation index (Biogeosciences 9:179-191)
  *
- * Version: v0.5 (2026-04-16)
+ * Version: v0.6 (2026-04-17)
  * ============================================================================
  */
 
@@ -1159,6 +1159,20 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     loadEndDate = loadEndDate.advance(mwBufferDays, 'day');
   }
 
+  // Months buffer for smoother edge correction (Whittaker or Moving-Window).
+  // Loads extra data before/after the year so edge images have neighbours to smooth
+  // against; the buffer is stripped by filterDate(startDate, endDate) in each branch.
+  var smoothMonths = 0;
+  if (smoothingOptions.enabled && smoothingOptions.bufferMonths > 0) {
+    smoothMonths = smoothingOptions.bufferMonths;
+  } else if (mwOptions.enabled && mwOptions.bufferMonths > 0) {
+    smoothMonths = mwOptions.bufferMonths;
+  }
+  if (smoothMonths > 0) {
+    loadStartDate = loadStartDate.advance(-smoothMonths, 'month');
+    loadEndDate = loadEndDate.advance(smoothMonths, 'month');
+  }
+
   // ---- Landsat Harmonized branch ----
   if (product.type === 'landsat') {
     var ltFilter = ee.Filter.and(
@@ -1906,6 +1920,24 @@ var mwInfo = ui.Label(
    whiteSpace: 'pre-wrap', shown: false}
 );
 
+// ---- Smoothing Edge Buffer (shared by Whittaker and Moving-Window) ----
+var smoothBufferInput = ui.Textbox({
+  value: '3',
+  placeholder: 'Integer >= 0 (default 3)',
+  style: {stretch: 'horizontal', fontSize: '12px'}
+});
+var smoothBufferPanel = ui.Panel({
+  widgets: [makeRow('Buffer months:', smoothBufferInput)],
+  style: {shown: false, margin: '2px 0 0 12px'}
+});
+var smoothBufferInfo = ui.Label(
+  'Extends the loaded series by N months before Jan 1 and after Dec 31 before smoothing, ' +
+  'then removes the buffer so EFA statistics are based on the actual year only. ' +
+  'Reduces edge distortion at the start/end of the series. Set to 0 to disable.',
+  {fontSize: '10px', color: '#7f8c8d', margin: '1px 0 4px 12px',
+   whiteSpace: 'pre-wrap', shown: false}
+);
+
 // ---- Calculate Button ----
 var calcButton = ui.Button({
   label: 'CALCULATE & EXPORT',
@@ -1970,6 +2002,7 @@ var mainPanel = ui.Panel({
     gapFillCheckbox, gapFillControls, gapFillInfo,
     smoothCheckbox, smoothControls, smoothInfo,
     mwCheckbox, mwControls, mwInfo,
+    smoothBufferPanel, smoothBufferInfo,
     calcButton, statusLabel,
     infoToggle, infoContent
   ],
@@ -2050,6 +2083,8 @@ smoothCheckbox.onChange(function(checked) {
   applySmoothing = checked;
   smoothControls.style().set('shown', checked);
   smoothInfo.style().set('shown', checked);
+  smoothBufferPanel.style().set('shown', checked);
+  smoothBufferInfo.style().set('shown', checked);
   if (checked) {
     mwCheckbox.setValue(false);
     applyMovingWindow = false;
@@ -2063,6 +2098,8 @@ mwCheckbox.onChange(function(checked) {
   applyMovingWindow = checked;
   mwControls.style().set('shown', checked);
   mwInfo.style().set('shown', checked);
+  smoothBufferPanel.style().set('shown', checked);
+  smoothBufferInfo.style().set('shown', checked);
   if (checked) {
     smoothCheckbox.setValue(false);
     applySmoothing = false;
@@ -2201,6 +2238,8 @@ productSelect.onChange(function(productKey) {
     applyMovingWindow = false;
     mwControls.style().set('shown', false);
     mwInfo.style().set('shown', false);
+    smoothBufferPanel.style().set('shown', false);
+    smoothBufferInfo.style().set('shown', false);
   }
 });
 
@@ -2261,11 +2300,22 @@ function getGapFillOptions() {
   };
 }
 
+function getBufferMonths() {
+  var isSmoothingActive = smoothCheckbox.getValue() || mwCheckbox.getValue();
+  if (!isSmoothingActive) return {months: 0, suffix: ''};
+  var text = smoothBufferInput.getValue().trim();
+  if (!/^\d+$/.test(text)) {
+    return {error: 'ERROR: Smoothing buffer must be a non-negative integer (e.g. 3).'};
+  }
+  var n = parseInt(text, 10);
+  return {months: n, suffix: n > 0 ? '_B' + n : ''};
+}
+
 function getSmoothingOptions() {
   applySmoothing = smoothCheckbox.getValue();
 
   if (!applySmoothing) {
-    return {enabled: false, lambda: 10, suffix: ''};
+    return {enabled: false, lambda: 10, bufferMonths: 0, suffix: ''};
   }
 
   var lambdaText = smoothLambdaInput.getValue().trim();
@@ -2274,17 +2324,20 @@ function getSmoothingOptions() {
   }
 
   var lambda = parseFloat(lambdaText);
+  var bufOpts = getBufferMonths();
+  if (bufOpts.error) return {error: bufOpts.error};
   return {
     enabled: true,
     lambda: lambda,
-    suffix: '_WS' + lambda
+    bufferMonths: bufOpts.months,
+    suffix: '_WS' + lambda + bufOpts.suffix
   };
 }
 
 function getMovingWindowOptions() {
   applyMovingWindow = mwCheckbox.getValue();
   if (!applyMovingWindow) {
-    return {enabled: false, window: 5, method: 'Median', suffix: ''};
+    return {enabled: false, window: 5, method: 'Median', bufferMonths: 0, suffix: ''};
   }
   var method = mwMethodSelect.getValue() || 'Median';
   var windowText = mwWindowInput.getValue().trim();
@@ -2296,11 +2349,14 @@ function getMovingWindowOptions() {
     return {error: 'ERROR: Moving-window size must be an odd integer >= 3.'};
   }
   var methodCode = (method === 'Median') ? 'm' : 'M';
+  var bufOpts = getBufferMonths();
+  if (bufOpts.error) return {error: bufOpts.error};
   return {
     enabled: true,
     method: method,
     window: windowSize,
-    suffix: '_MW' + methodCode + windowSize
+    bufferMonths: bufOpts.months,
+    suffix: '_MW' + methodCode + windowSize + bufOpts.suffix
   };
 }
 
