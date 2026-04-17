@@ -2066,7 +2066,8 @@ var infoContent = ui.Label(
   '    that linearize the cyclical day-of-year variable.\n\n' +
   'Statistics:\n' +
   '  Centrality: Mean, Median, P05 - 5% percentile, P95 - 95% percentile, Min, Max\n' +
-  '  Dispersion: StdDev, IQR(P95-P05) - interquantile range, MAD - Median Absolute Deviation, CV(StdDev/Mean) - Coefficient of Variation\n' +
+  '  Dispersion: StdDev, IQR(P95-P05) - interquantile range, MAD - Median Absolute Deviation,\n' +  
+  ' CV(StdDev/Mean) - Coefficient of Variation\n' +
   '  Phenology: DOY_Max, DOY_Min, Springness, Winterness, GSL\n' +
   '  Integration: CumSum (annual sum), Amplitude (Max-Min)\n\n' +
   'Time-series smoothing (applied before annual aggregation):\n' +
