@@ -904,6 +904,28 @@ var MISSION_GROUPS = {
 };
 var MISSION_NAMES = ['MODIS', 'Landsat', 'Sentinel-2', 'Sentinel-1'];
 
+// Per-product year-range button definitions.
+// Each entry is an array of {label, start, end?} objects; end omitted means open-ended.
+var PRODUCT_YEAR_RANGES = {
+  'MOD09Q1 (250m, 8-day)':             [{label: 'MOD09Q1 range (2000+)',   start: 2000}],
+  'MOD09A1 (500m, 8-day)':             [{label: 'MOD09A1 range (2000+)',   start: 2000}],
+  'MOD11A1 (1km, Daily)':              [{label: 'MOD11A1 range (2000+)',   start: 2000}],
+  'MOD11A2 (1km, 8-day)':              [{label: 'MOD11A2 range (2000+)',   start: 2000}],
+  'MOD13Q1 (250m, 16-day)':            [{label: 'MOD13Q1 range (2000+)',   start: 2000}],
+  'MOD17A2H (500m, 8-day)':            [{label: 'MOD17A2H range (2000+)',  start: 2000}],
+  'MCD43A1 (500m, Daily)':             [{label: 'MCD43A1 range (2000+)',   start: 2000}],
+  'MOD16A2 (500m, 8-day)':             [{label: 'MOD16A2 range (2001+)',   start: 2001}],
+  'MCD15A3H (500m, 4-day)':            [{label: 'MCD15A3H range (2002+)',  start: 2002}],
+  'Landsat Harmonized (30m, LT5/7/8)': [
+    {label: 'All Landsat (1984+)',  start: 1984},
+    {label: 'LT5 era (1984–2012)', start: 1984, end: 2012},
+    {label: 'LT7 era (1999–2023)', start: 1999, end: 2023},
+    {label: 'LT8 era (2013+)',     start: 2013}
+  ],
+  'Sentinel-2 SR (10/20m, 5-day)':     [{label: 'Sentinel-2 range (2017+)', start: 2017}],
+  'Sentinel-1 SAR (10m, ~12-day)':     [{label: 'Sentinel-1 range (2015+)', start: 2015}]
+};
+
 
 // ============================================================================
 // SECTION 5: STATISTICS ENGINE
@@ -1802,46 +1824,12 @@ var yearButtonsMain = ui.Panel({
   layout: ui.Panel.Layout.flow('horizontal')
 });
 
-var satRangesLabel = ui.Label('Select specific ranges by satellite mission', 
-  {fontSize: '11px', color: '#7f8c8d'});
-
+// Populated dynamically by rebuildSatRangeButtons() when a product is selected
+var satRangesLabel = ui.Label('Select range for this product',
+  {fontSize: '11px', color: '#7f8c8d', shown: false});
 var yearButtonsSatRanges = ui.Panel({
-  widgets: [
-
-    ui.Button({label: 'Select MODIS range (2000+)', style: S.smallBtn, 
-      onClick: function() {
-      var keys = Object.keys(yearCheckboxes);
-      for (var i = 0; i < keys.length; i++) {
-        yearCheckboxes[keys[i]].setValue(parseInt(keys[i]) >= 2000);
-      }
-    }}),
-
-    ui.Button({label: 'Select Landsat range (1984+)', style: S.smallBtn, 
-      onClick: function() {
-      var keys = Object.keys(yearCheckboxes);
-      for (var i = 0; i < keys.length; i++) {
-        yearCheckboxes[keys[i]].setValue(parseInt(keys[i]) >= 1984);
-      }
-    }}),
-
-    ui.Button({label: 'Select Sentinel-1 range (2015+)', style: S.smallBtn, 
-      onClick: function() {
-      var keys = Object.keys(yearCheckboxes);
-      for (var i = 0; i < keys.length; i++) {
-        yearCheckboxes[keys[i]].setValue(parseInt(keys[i]) >= 2015);
-      }
-    }}),
-
-    ui.Button({label: 'Select Sentinel-2 range (2017+)', style: S.smallBtn, 
-      onClick: function() {
-      var keys = Object.keys(yearCheckboxes);
-      for (var i = 0; i < keys.length; i++) {
-        yearCheckboxes[keys[i]].setValue(parseInt(keys[i]) >= 2017);
-      }
-    }})
-
-  ],
-  layout: ui.Panel.Layout.flow('vertical')
+  layout: ui.Panel.Layout.flow('vertical'),
+  style: {shown: false}
 });
 
 // ---- 4. Variables Section ----
@@ -2352,6 +2340,35 @@ function getAOI() {
   return ee.FeatureCollection(features).geometry();
 }
 
+// --- Satellite Range Buttons ---
+// Rebuilds yearButtonsSatRanges for the currently selected product.
+// Each range entry selects years >= start and (if end is defined) <= end.
+function rebuildSatRangeButtons(productKey) {
+  yearButtonsSatRanges.widgets().reset([]);
+  var ranges = productKey && PRODUCT_YEAR_RANGES[productKey];
+  var hasRanges = ranges && ranges.length > 0;
+  satRangesLabel.style().set('shown', hasRanges);
+  yearButtonsSatRanges.style().set('shown', hasRanges);
+  if (!hasRanges) return;
+
+  for (var ri = 0; ri < ranges.length; ri++) {
+    (function(range) {
+      yearButtonsSatRanges.add(ui.Button({
+        label: range.label,
+        style: S.smallBtn,
+        onClick: function() {
+          var keys = Object.keys(yearCheckboxes);
+          for (var i = 0; i < keys.length; i++) {
+            var yr = parseInt(keys[i]);
+            var inRange = yr >= range.start && (range.end === undefined || yr <= range.end);
+            yearCheckboxes[keys[i]].setValue(inRange);
+          }
+        }
+      }));
+    })(ranges[ri]);
+  }
+}
+
 // --- Mission Selection ---
 function selectMission(missionName) {
   selectedMission = missionName;
@@ -2374,6 +2391,7 @@ function selectMission(missionName) {
     varsPanel.widgets().reset([]);
     variableCheckboxes = {};
     productInfo.setValue('');
+    rebuildSatRangeButtons(null);              // hide range buttons until a product is picked
   }
 }
 
@@ -2466,6 +2484,8 @@ productSelect.onChange(function(productKey) {
     smoothBufferPanel.style().set('shown', false);
     smoothBufferInfo.style().set('shown', false);
   }
+
+  rebuildSatRangeButtons(productKey);
 });
 
 // --- Gather Selections ---
