@@ -2184,21 +2184,27 @@ var productHeader  = ui.Label('2. Satellite Product', S.section);
 var missionSubHeader = ui.Label('Mission', S.category);
 var productSubHeader = ui.Label('Product', S.category);
 
-// Level 2.1 — mission radio buttons
+// Level 2.1 — mission radio buttons (two rows to avoid horizontal overflow)
 var selectedMission = null;
 var missionButtons  = {};
-var missionPanel = ui.Panel({
-  layout: ui.Panel.Layout.flow('horizontal'),
-  style:  {stretch: 'horizontal', margin: '2px 0 4px 0'}
-});
 var S_btnSel   = {backgroundColor: '#1a73e8', color: '#1a73e8',   fontWeight: 'bold',
                   fontSize: '11px', margin: '2px', padding: '4px 8px'};
 var S_btnUnsel = {backgroundColor: '#f0f0f0', color: '#333333', fontWeight: 'normal',
                   fontSize: '11px', margin: '2px', padding: '4px 8px'};
-MISSION_NAMES.forEach(function(m) {
+var missionRow1 = ui.Panel({layout: ui.Panel.Layout.flow('horizontal'),
+                            style: {stretch: 'horizontal', margin: '0'}});
+var missionRow2 = ui.Panel({layout: ui.Panel.Layout.flow('horizontal'),
+                            style: {stretch: 'horizontal', margin: '0'}});
+var missionPanel = ui.Panel({
+  widgets: [missionRow1, missionRow2],
+  layout: ui.Panel.Layout.flow('vertical'),
+  style:  {stretch: 'horizontal', margin: '2px 0 4px 0'}
+});
+var missionSplit = Math.ceil(MISSION_NAMES.length / 2);
+MISSION_NAMES.forEach(function(m, idx) {
   var btn = ui.Button({label: m, style: S_btnUnsel});
   missionButtons[m] = btn;
-  missionPanel.add(btn);
+  (idx < missionSplit ? missionRow1 : missionRow2).add(btn);
 });
 
 // Level 2.2 — product dropdown (populated when a mission is selected)
@@ -2219,7 +2225,7 @@ var yearCol2 = ui.Panel({layout: ui.Panel.Layout.flow('vertical'), style: yearCo
 var yearCol3 = ui.Panel({layout: ui.Panel.Layout.flow('vertical'), style: yearColStyle});
 var yearCols = [yearCol1, yearCol2, yearCol3];
 var yearList = [];
-for (var y = 1982; y <= 2026; y++) yearList.push(y);
+for (var y = 1982; y <= 2026; y++) yearList.push(y);  // 1982 for Landsat 4 coverage
 var yearPerCol = Math.ceil(yearList.length / 3);
 for (var yi = 0; yi < yearList.length; yi++) {
   var ycb = ui.Checkbox({label: String(yearList[yi]), value: false, style: yearCbStyle});
@@ -2793,6 +2799,34 @@ function rebuildSatRangeButtons(productKey) {
   }
 }
 
+// Derives the overall availability window for a product from its PRODUCT_YEAR_RANGES entries.
+// Returns {start, end} where end is undefined for open-ended products.
+function getProductAvailability(productKey) {
+  var ranges = PRODUCT_YEAR_RANGES[productKey];
+  if (!ranges || ranges.length === 0) return null;
+  var minStart = Infinity, maxEnd = -Infinity, openEnded = false;
+  for (var i = 0; i < ranges.length; i++) {
+    if (ranges[i].start < minStart) minStart = ranges[i].start;
+    if (ranges[i].end === undefined) { openEnded = true; }
+    else if (ranges[i].end > maxEnd) { maxEnd = ranges[i].end; }
+  }
+  return {start: minStart, end: openEnded ? undefined : maxEnd};
+}
+
+// Enable/disable year checkboxes to reflect a product's data availability.
+// Disabled years are also unchecked. Pass null productKey to re-enable all.
+function updateYearAvailability(productKey) {
+  var avail = productKey ? getProductAvailability(productKey) : null;
+  var keys = Object.keys(yearCheckboxes);
+  for (var i = 0; i < keys.length; i++) {
+    var yr = parseInt(keys[i], 10);
+    var inRange = !avail ||
+      (yr >= avail.start && (avail.end === undefined || yr <= avail.end));
+    yearCheckboxes[keys[i]].setDisabled(!inRange);
+    if (!inRange) yearCheckboxes[keys[i]].setValue(false);
+  }
+}
+
 // --- Mission Selection ---
 function selectMission(missionName) {
   selectedMission = missionName;
@@ -2816,6 +2850,7 @@ function selectMission(missionName) {
     variableCheckboxes = {};
     productInfo.setValue('');
     rebuildSatRangeButtons(null);              // hide range buttons until a product is picked
+    updateYearAvailability(null);              // re-enable all years until a product is picked
   }
 }
 
@@ -2828,7 +2863,10 @@ productSelect.onChange(function(productKey) {
   varsPanel.widgets().reset([]);
   variableCheckboxes = {};
 
-  if (!productKey || !PRODUCTS[productKey]) return;
+  if (!productKey || !PRODUCTS[productKey]) {
+    updateYearAvailability(null);
+    return;
+  }
 
   var product = PRODUCTS[productKey];
   var varNames = Object.keys(product.variables);
@@ -2929,6 +2967,7 @@ productSelect.onChange(function(productKey) {
   }
 
   rebuildSatRangeButtons(productKey);
+  updateYearAvailability(productKey);
 });
 
 // --- Gather Selections ---
