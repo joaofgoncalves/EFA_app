@@ -1,18 +1,20 @@
 /*
  * ============================================================================
- * EFA Calculator - MODIS, Landsat, Sentinel-2 & Sentinel-1 SAR Annual Statistics
+ * EFA Calculator - MODIS, Landsat, VIIRS, Sentinel-2, Sentinel-3 & Sentinel-1 SAR Annual Statistics
  * ============================================================================
  *
- * Computes Ecosystem Functional Attributes (EFAs) from MODIS, Landsat,
- * Sentinel-2, and Sentinel-1 SAR time series. EFAs characterize ecosystem
+ * Computes Ecosystem Functional Attributes (EFAs) from MODIS, Landsat, VIIRS,
+ * Sentinel-2, Sentinel-3 OLCI, and Sentinel-1 SAR time series. EFAs characterize ecosystem
  * functioning through:
  *   - Magnitude: annual mean/median (productivity proxy)
  *   - Seasonality: CV, StdDev, IQR (variation intensity)
  *   - Phenology: DOY of peak activity with circular transforms
  *
- * Supports 10 MODIS products, 1 Landsat harmonized product, 1 Sentinel-2
- * product, 1 Sentinel-1 SAR product (experimental), 28+ spectral/biophysical/
- * SAR variables, and 17 annual statistics across 4 categories.
+ * Supports 9 MODIS products, 6 Landsat products (harmonized + individual
+ * missions), 1 HLS S30 product, 5 VIIRS SNPP products, 1 Sentinel-2 product,
+ * 1 Sentinel-3 OLCI product, 1 Sentinel-1 SAR product (experimental),
+ * 30+ spectral/biophysical/SAR variables, and 17 annual statistics across
+ * 4 categories.
  *
  * Optional time-series smoothing before annual aggregation:
  *   - Temporal gap fill: fills masked pixels from a centered image window
@@ -142,6 +144,62 @@ function maskQA_MCD15A3H(image) {
   return image.updateMask(
     qa.lte(1).and(cloud.eq(0)).and(cloudShadow.eq(0)).and(cloudIce.eq(0))
   );
+}
+
+// --------------------------------------------------------------------------
+// VIIRS (SNPP) QA mask functions — 500m grid, except VNP21A1D (1km LST)
+// --------------------------------------------------------------------------
+
+// VNP13A1: pixel_reliability simple class — 0=Excellent, 1=Good, 2=Acceptable,
+// 3=Marginal, 7=Cloud Shadow, 8=Snow/Ice, 9=Cloud, 10=Estimated, 11=LTAVG.
+// Keep <=1 by default; this mirrors how MOD13Q1's SummaryQA is handled but is
+// stricter (we drop "Acceptable") because VIIRS pixel_reliability has finer classes.
+function maskQA_VNP13A1(image) {
+  var rel = image.select('pixel_reliability');
+  return image.updateMask(rel.gte(0).and(rel.lte(1)));
+}
+
+// VNP09H1: SurfReflect_State_500m — cloud state (bits 0-1), shadow (2),
+// cirrus (8-9), internal cloud (10). Same semantics as MOD09A1 StateQA.
+function maskQA_VNP09H1(image) {
+  var qa = image.select('SurfReflect_State_500m');
+  var cloudState  = getQABits(qa,  0,  1, 'cloud_state');
+  var cloudShadow = getQABits(qa,  2,  2, 'cloud_shadow');
+  var cirrus      = getQABits(qa,  8,  9, 'cirrus');
+  var intCloud    = getQABits(qa, 10, 10, 'int_cloud');
+  return image.updateMask(
+    cloudState.eq(0).and(cloudShadow.eq(0)).and(cirrus.eq(0)).and(intCloud.eq(0))
+  );
+}
+
+// VNP43IA4 NBAR: mandatory quality per I-band (0=full BRDF inversion, 1=magnitude
+// inversion, 255=fill). Keep when both I1 (Red) and I2 (NIR) <= 1.
+function maskQA_VNP43IA4(image) {
+  var qa1 = image.select('BRDF_Albedo_Band_Mandatory_Quality_I1');
+  var qa2 = image.select('BRDF_Albedo_Band_Mandatory_Quality_I2');
+  return image.updateMask(qa1.lte(1).and(qa2.lte(1)));
+}
+
+// VNP15A2H LAI/FPAR: FparLai_QC bits 0-1 (MODLAND QA <=1) + FparExtra_QC cloud
+// confidence (bits 0-1 <=1), cloud shadow (bit 2), thin cirrus (bit 3).
+function maskQA_VNP15A2H(image) {
+  var qc = image.select('FparLai_QC');
+  var qa = getQABits(qc, 0, 1, 'qa');
+  var extra = image.select('FparExtra_QC');
+  var cloudConf   = getQABits(extra, 0, 1, 'cloud_conf');
+  var cloudShadow = getQABits(extra, 2, 2, 'cloud_shadow');
+  var cirrus      = getQABits(extra, 3, 3, 'cirrus');
+  return image.updateMask(
+    qa.lte(1).and(cloudConf.lte(1)).and(cloudShadow.eq(0)).and(cirrus.eq(0))
+  );
+}
+
+// VNP21A1D Day LST: QC bits 0-1 (Mandatory QA) — 0=good, 1=unreliable, 2/3=not produced.
+// Keep <=1 to retain both good and unreliable-but-retrieved pixels (matches MOD11 policy).
+function maskQA_VNP21A1D(image) {
+  var qc = image.select('QC');
+  var qa = getQABits(qc, 0, 1, 'qa');
+  return image.updateMask(qa.lte(1));
 }
 
 // Add DOY band to each image in a collection
@@ -767,6 +825,116 @@ function computeNDVI_MOD09Q1(img) {
     .set('system:time_start', img.get('system:time_start'));
 }
 
+// --------------------------------------------------------------------------
+// VIIRS spectral index functions
+// --------------------------------------------------------------------------
+// No VIIRS TCT is offered: published TCT coefficients (Zhang et al. 2016,
+// Zheng et al. 2017) target the native 750 m M-band reflectance, not the
+// 500 m gridded composites shipped in VNP13A1.
+
+// VNP13A1: 7-band M-band reflectance at 500m. GEE serves reflectance and VI bands
+// already in decimal form (scale factor pre-applied) — do NOT multiply by 1e-4.
+// SWIR1_reflectance (~1.24 µm) → Gao NDWI; SWIR3_reflectance (~2.25 µm) → NBR.
+function VNP13A1_SpectralIndices(img) {
+  var red   = img.select('red_reflectance').toFloat();
+  var nir   = img.select('NIR_reflectance').toFloat();
+  var blue  = img.select('blue_reflectance').toFloat();
+  var swir1 = img.select('SWIR1_reflectance').toFloat();
+  var swir3 = img.select('SWIR3_reflectance').toFloat();
+
+  var ndvi = nir.subtract(red).divide(nir.add(red));
+
+  var evi = img.expression(
+    '2.5 * (NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1)', {
+      'NIR': nir, 'RED': red, 'BLUE': blue
+  });
+
+  // EVI2 (Jiang et al. 2008) — soil-adjusted, Blue-free EVI surrogate
+  var evi2 = img.expression(
+    '2.5 * (NIR - RED) / (NIR + 2.4 * RED + 1)', {
+      'NIR': nir, 'RED': red
+  });
+
+  var savi = img.expression(
+    '(1 + L) * (NIR - RED) / (NIR + RED + L)', {
+      'NIR': nir, 'RED': red, 'L': 0.5
+  });
+
+  var msavi = img.expression(
+    '(2 * NIR + 1 - sqrt(pow((2 * NIR + 1), 2) - 8 * (NIR - RED))) / 2', {
+      'NIR': nir, 'RED': red
+  });
+
+  // Gao NDWI: NIR vs 1.24 µm SWIR → water / leaf water content
+  var ndwi = nir.subtract(swir1).divide(nir.add(swir1));
+
+  // NBR: NIR vs 2.25 µm long SWIR
+  var nbr = nir.subtract(swir3).divide(nir.add(swir3));
+
+  return ndvi.addBands(evi).addBands(evi2).addBands(savi)
+    .addBands(msavi).addBands(ndwi).addBands(nbr)
+    .rename(['ndvi', 'evi', 'evi2', 'savi', 'msavi', 'ndwi', 'nbr'])
+    .toFloat()
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// VNP09H1: I-bands at 500m — I1 Red (640nm), I2 NIR (865nm), I3 SWIR (1.61 µm).
+// GEE V002 serves reflectance already in decimal form — no 1e-4 multiplier.
+// No blue band → no EVI; no 2.1 µm → no NBR. NDWI here is the 1.6 µm variant
+// (a.k.a. NDMI / short-SWIR NDWI) — the same convention used elsewhere in the app
+// when only SWIR1 is available.
+function VNP09H1_SpectralIndices(img) {
+  var red = img.select('SurfReflect_I1').toFloat();
+  var nir = img.select('SurfReflect_I2').toFloat();
+  var swir = img.select('SurfReflect_I3').toFloat();
+
+  var ndvi = nir.subtract(red).divide(nir.add(red));
+
+  var savi = img.expression(
+    '(1 + L) * (NIR - RED) / (NIR + RED + L)', {
+      'NIR': nir, 'RED': red, 'L': 0.5
+  });
+
+  var msavi = img.expression(
+    '(2 * NIR + 1 - sqrt(pow((2 * NIR + 1), 2) - 8 * (NIR - RED))) / 2', {
+      'NIR': nir, 'RED': red
+  });
+
+  var ndwi = nir.subtract(swir).divide(nir.add(swir));
+
+  return ndvi.addBands(ndwi).addBands(savi).addBands(msavi)
+    .rename(['ndvi', 'ndwi', 'savi', 'msavi'])
+    .toFloat()
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// VNP43IA4: Nadir BRDF-adjusted reflectance, I-bands at 500m. Same topology as
+// VNP09H1 (I1/I2/I3). GEE V002 serves reflectance already in decimal form.
+function VNP43IA4_SpectralIndices(img) {
+  var red = img.select('Nadir_Reflectance_I1').toFloat();
+  var nir = img.select('Nadir_Reflectance_I2').toFloat();
+  var swir = img.select('Nadir_Reflectance_I3').toFloat();
+
+  var ndvi = nir.subtract(red).divide(nir.add(red));
+
+  var savi = img.expression(
+    '(1 + L) * (NIR - RED) / (NIR + RED + L)', {
+      'NIR': nir, 'RED': red, 'L': 0.5
+  });
+
+  var msavi = img.expression(
+    '(2 * NIR + 1 - sqrt(pow((2 * NIR + 1), 2) - 8 * (NIR - RED))) / 2', {
+      'NIR': nir, 'RED': red
+  });
+
+  var ndwi = nir.subtract(swir).divide(nir.add(swir));
+
+  return ndvi.addBands(ndwi).addBands(savi).addBands(msavi)
+    .rename(['ndvi', 'ndwi', 'savi', 'msavi'])
+    .toFloat()
+    .set('system:time_start', img.get('system:time_start'));
+}
+
 
 // ============================================================================
 // SECTION 3: BRDF / ALBEDO FUNCTIONS (Schaaf et al. 2002)
@@ -1158,6 +1326,82 @@ var PRODUCTS = {
       'OTCI': {band: 'OTCI'},
       'NDWI': {band: 'NDWI'}
     }
+  },
+
+  // ---- VIIRS SNPP (NASA/USGS, 2012+) ----
+  // All five products ride the default MODIS branch in loadAndProcessCollection
+  // (compute path for spectral-index products, scale path for biophysical products).
+  // No TCT: published VIIRS TCT coefficients were calibrated on native 750 m M-band
+  // reflectance and do not directly apply to the 500 m gridded composites here.
+
+  'VNP13A1 (500m, 16-day)': {
+    geeId: 'NASA/VIIRS/002/VNP13A1',
+    shortName: 'VNP13A1',
+    resolution: 500,
+    temporal: '16-day',
+    qaMask: maskQA_VNP13A1,
+    variables: {
+      'NDVI':  {compute: VNP13A1_SpectralIndices, band: 'ndvi'},
+      'EVI':   {compute: VNP13A1_SpectralIndices, band: 'evi'},
+      'EVI2':  {compute: VNP13A1_SpectralIndices, band: 'evi2'},
+      'SAVI':  {compute: VNP13A1_SpectralIndices, band: 'savi'},
+      'MSAVI': {compute: VNP13A1_SpectralIndices, band: 'msavi'},
+      'NDWI':  {compute: VNP13A1_SpectralIndices, band: 'ndwi'},
+      'NBR':   {compute: VNP13A1_SpectralIndices, band: 'nbr'}
+    }
+  },
+
+  'VNP09H1 (500m, 8-day)': {
+    geeId: 'NASA/VIIRS/002/VNP09H1',
+    shortName: 'VNP09H1',
+    resolution: 500,
+    temporal: '8-day',
+    qaMask: maskQA_VNP09H1,
+    variables: {
+      'NDVI':  {compute: VNP09H1_SpectralIndices, band: 'ndvi'},
+      'NDWI':  {compute: VNP09H1_SpectralIndices, band: 'ndwi'},
+      'SAVI':  {compute: VNP09H1_SpectralIndices, band: 'savi'},
+      'MSAVI': {compute: VNP09H1_SpectralIndices, band: 'msavi'}
+    }
+  },
+
+  'VNP43IA4 (500m, Daily)': {
+    geeId: 'NASA/VIIRS/002/VNP43IA4',
+    shortName: 'VNP43IA4',
+    resolution: 500,
+    temporal: 'Daily',
+    qaMask: maskQA_VNP43IA4,
+    variables: {
+      'NDVI':  {compute: VNP43IA4_SpectralIndices, band: 'ndvi'},
+      'NDWI':  {compute: VNP43IA4_SpectralIndices, band: 'ndwi'},
+      'SAVI':  {compute: VNP43IA4_SpectralIndices, band: 'savi'},
+      'MSAVI': {compute: VNP43IA4_SpectralIndices, band: 'msavi'}
+    }
+  },
+
+  // VNP15A2H and VNP21A1D: GEE V002 serves bands already in physical units
+  // (LAI in area fraction, FPAR in 0-1, LST in Kelvin) — use scale: 1.
+  'VNP15A2H (500m, 8-day)': {
+    geeId: 'NASA/VIIRS/002/VNP15A2H',
+    shortName: 'VNP15A2H',
+    resolution: 500,
+    temporal: '8-day',
+    qaMask: maskQA_VNP15A2H,
+    variables: {
+      'LAI':  {band: 'Lai',  scale: 1},
+      'FPAR': {band: 'Fpar', scale: 1}
+    }
+  },
+
+  'VNP21A1D (1km, Daily)': {
+    geeId: 'NASA/VIIRS/002/VNP21A1D',
+    shortName: 'VNP21A1D',
+    resolution: 1000,
+    temporal: 'Daily',
+    qaMask: maskQA_VNP21A1D,
+    variables: {
+      'LST_Day': {band: 'LST_1KM', scale: 1}
+    }
   }
 };
 
@@ -1177,9 +1421,14 @@ var MISSION_GROUPS = {
                  'HLS S30 Sentinel-2 (30m, daily)'],
   'Sentinel-2': ['Sentinel-2 SR (10/20m, 5-day)'],
   'Sentinel-3': ['Sentinel-3 OLCI (300m, ~2-day)'],
-  'Sentinel-1': ['Sentinel-1 SAR (10m, ~12-day)']
+  'Sentinel-1': ['Sentinel-1 SAR (10m, ~12-day)'],
+  'VIIRS':      ['VNP13A1 (500m, 16-day)',
+                 'VNP09H1 (500m, 8-day)',
+                 'VNP43IA4 (500m, Daily)',
+                 'VNP15A2H (500m, 8-day)',
+                 'VNP21A1D (1km, Daily)']
 };
-var MISSION_NAMES = ['MODIS', 'Landsat', 'Sentinel-1', 'Sentinel-2', 'Sentinel-3'];
+var MISSION_NAMES = ['MODIS', 'Landsat', 'VIIRS', 'Sentinel-1', 'Sentinel-2', 'Sentinel-3'];
 
 // Per-product year-range button definitions.
 // Each entry is an array of {label, start, end?} objects; end omitted means open-ended.
@@ -1207,7 +1456,12 @@ var PRODUCT_YEAR_RANGES = {
   'HLS S30 Sentinel-2 (30m, daily)': [{label: 'HLS S30 range (2016+)', start: 2016}],
   'Sentinel-2 SR (10/20m, 5-day)':     [{label: 'Sentinel-2 range (2017+)', start: 2017}],
   'Sentinel-3 OLCI (300m, ~2-day)':   [{label: 'Sentinel-3 range (2017+)', start: 2017}],
-  'Sentinel-1 SAR (10m, ~12-day)':     [{label: 'Sentinel-1 range (2015+)', start: 2015}]
+  'Sentinel-1 SAR (10m, ~12-day)':     [{label: 'Sentinel-1 range (2015+)', start: 2015}],
+  'VNP13A1 (500m, 16-day)':            [{label: 'VNP13A1 range (2012+)',  start: 2012}],
+  'VNP09H1 (500m, 8-day)':             [{label: 'VNP09H1 range (2012+)',  start: 2012}],
+  'VNP43IA4 (500m, Daily)':            [{label: 'VNP43IA4 range (2012+)', start: 2012}],
+  'VNP15A2H (500m, 8-day)':            [{label: 'VNP15A2H range (2012+)', start: 2012}],
+  'VNP21A1D (1km, Daily)':             [{label: 'VNP21A1D range (2012+)', start: 2012}]
 };
 
 
@@ -1945,7 +2199,10 @@ function isSARLinearUnbounded(varName) {
 }
 
 function isCatalogBoundedEVI(productKey, varName) {
-  return varName === 'EVI' && productKey === 'MOD13Q1 (250m, 16-day)';
+  return varName === 'EVI' && (
+    productKey === 'MOD13Q1 (250m, 16-day)' ||
+    productKey === 'VNP13A1 (500m, 16-day)'
+  );
 }
 
 function isFormulaEVI(varName) {
@@ -2149,7 +2406,7 @@ var S = {
 // --- Title ---
 var titleLabel = ui.Label('EFA Calculator', S.title);
 var subtitleLabel = ui.Label(
-  'Ecosystem Functional Attributes from MODIS, Landsat, Sentinel-2 & Sentinel-1 SAR', S.subtitle);
+  'Ecosystem Functional Attributes from Sentinel (ESA/Copernicus), MODIS, Landsat, and VIIRS (NASA/USGS)', S.subtitle);
 
 // ---- 1. AOI Section ----
 var aoiHeader = ui.Label('1. Area of Interest', S.section);
@@ -2200,7 +2457,7 @@ var missionPanel = ui.Panel({
   layout: ui.Panel.Layout.flow('vertical'),
   style:  {stretch: 'horizontal', margin: '2px 0 4px 0'}
 });
-var missionSplit = 2;  // Row 1: MODIS, Landsat  |  Row 2: Sentinel-1, -2, -3
+var missionSplit = 3;  // Row 1: MODIS, Landsat, VIIRS  |  Row 2: Sentinel-1, -2, -3
 MISSION_NAMES.forEach(function(m, idx) {
   var btn = ui.Button({label: m, style: S_btnUnsel});
   missionButtons[m] = btn;
@@ -2926,6 +3183,35 @@ productSelect.onChange(function(productKey) {
       '  S1A: 2014-10-03+  ·  S1B: 2016–2021  ·  S1C: 2023-present\n' +
       '  IW mode, VV+VH dual-pol  ·  Select years 2015 or later for full-year coverage\n' +
       '  dB: VV, VH, VV−VH  ·  linear ratio: CR, IR  ·  0–1: DpRVI, DpRVIc, RFDI';
+  } else if (productKey.indexOf('VNP') === 0) {
+    // VIIRS SNPP products — share the MODIS collection-loading branch
+    var viirsBase = product.resolution + 'm | ' + product.temporal + ' | ' +
+      varNames.length + ' variable(s) | QA mask: available\n' +
+      '  VIIRS SNPP: 2012-01-17+  ·  500 m gridded M-band / I-band composites\n' +
+      '  No TCT: published coefficients target native 750 m M-bands, not the 500 m grid.';
+    if (productKey.indexOf('VNP13A1') === 0) {
+      infoText = viirsBase + '\n' +
+        '  Reflectance-derived indices (NDVI, EVI, EVI2, SAVI, MSAVI, NDWI, NBR).\n' +
+        '  NDWI uses SWIR1 (~1.24 µm, Gao); NBR uses SWIR3 (~2.25 µm).';
+    } else if (productKey.indexOf('VNP09H1') === 0) {
+      infoText = viirsBase + '\n' +
+        '  I-bands only (I1 Red, I2 NIR, I3 SWIR ~1.6 µm) — no EVI, no NBR.\n' +
+        '  NDWI is the short-SWIR variant (NIR / 1.6 µm).';
+    } else if (productKey.indexOf('VNP43IA4') === 0) {
+      infoText = viirsBase + '\n' +
+        '  NBAR (nadir BRDF-adjusted, solar-noon) — I1/I2/I3 only.\n' +
+        '  NDWI is the short-SWIR variant (NIR / 1.6 µm).';
+    } else if (productKey.indexOf('VNP15A2H') === 0) {
+      infoText = viirsBase + '\n' +
+        '  LAI (Area fraction, scale 0.1)  ·  FPAR (0-1, scale 0.01).';
+    } else if (productKey.indexOf('VNP21A1D') === 0) {
+      infoText = '1000m | Daily | ' + varNames.length +
+        ' variable(s) | QA mask: available\n' +
+        '  VIIRS SNPP VNP21A1D: 2012-01-19+  ·  Daytime LST only (Kelvin, scale 0.02)\n' +
+        '  Night LST is distributed in VNP21A1N — not registered in this app.';
+    } else {
+      infoText = viirsBase;
+    }
   } else {
     infoText = product.resolution + 'm | ' + product.temporal +
       ' | ' + varNames.length + ' variable(s)' +
