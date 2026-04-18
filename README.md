@@ -4,7 +4,7 @@
 
 The app is designed for two main use cases:
 
-- Run ready-made EFA calculations from supported MODIS/MCD, Landsat, Sentinel-2, and Sentinel-1 SAR products.
+- Run ready-made EFA calculations from supported MODIS/MCD, Landsat, VIIRS SNPP, Sentinel-1 SAR, Sentinel-2, and Sentinel-3 OLCI products.
 - Extend the script with your own variables, indices, statistics, or products by editing the central registries in the app.
 
 There is no build system. Paste or open `EFA_Calculator_App.js` in the Earth Engine Code Editor, click **Run**, configure the side panel, then start the generated export tasks from the Earth Engine **Tasks** tab.
@@ -28,12 +28,12 @@ Not every statistic is equally meaningful for every variable. For example, the c
 1. Open `EFA_Calculator_App.js` in the Google Earth Engine Code Editor.
 2. Click **Run**.
 3. Define an area of interest using either **Draw on Map** or **GEE Asset**.
-4. Select a satellite product. MODIS/MCD products are listed first; the harmonized Landsat product is listed after them.
+4. Select a mission family (MODIS, Landsat, VIIRS, Sentinel-1, Sentinel-2, or Sentinel-3) from the mission buttons, then choose a specific product from the dropdown.
 5. Select one or more years.
 6. Select one or more variables.
 7. Select one or more annual statistics.
 8. Set export options: CRS, scale (i.e., spatial resolution), Google Drive folder, maximum number of pixels, and raster bit depth/encoding.
-9. Leave the QA/cloud mask enabled unless you have a specific reason to inspect unmasked MODIS values.
+9. Leave the QA/cloud mask enabled unless you have a specific reason to inspect unmasked MODIS or VIIRS values.
 10. Optionally enable temporal gap filling and/or one of the time-series smoothers.
 11. Click **CALCULATE & EXPORT**.
 12. Check the preview layer added to the map.
@@ -52,10 +52,10 @@ Large year ranges, daily products, large AOIs, Landsat exports, or many variable
 | Panel option | Default | Meaning |
 | --- | --- | --- |
 | Area of Interest | Draw on Map | Either draw a rectangle/polygon or load a FeatureCollection asset. Multiple drawn geometries are combined. |
+| Mission | None | Filters the product dropdown to the selected mission family. |
 | Satellite Product | None | Product registry entry to use. Selecting a product rebuilds the variable list and updates the default scale. |
-| Year(s) | None | Years from 1984 through 2026 are available in the UI. Data availability still depends on each satellite product. |
-| Select MODIS range | 2000-2026 | Convenience button that checks the MODIS-era years in the current UI. |
-| Select Sentinel-1 range | 2015-2026 | Convenience button that checks years 2015 onward. Sentinel-1A data starts 2014-10-03; selecting from 2015 ensures complete calendar-year coverage. |
+| Year(s) | None | Years from 1982 through 2026 are available in the UI. Data availability depends on each satellite product. |
+| Year range button | Product-specific | Convenience button that checks the relevant data years for the selected product. Landsat Harmonized offers multiple range buttons (all years, LT5 era, LT7 era, LT8 era). |
 | Variables / Dimensions | None | Single-band variables calculated from the selected product. |
 | Annual Statistics | None | Annual aggregation functions applied to each variable-year collection. |
 | CRS | `EPSG:4326` | Export projection. Change if you need a projected CRS for distance/area consistency. |
@@ -63,7 +63,7 @@ Large year ranges, daily products, large AOIs, Landsat exports, or many variable
 | Drive folder | `GEE_EFA` | Google Drive folder used by `Export.image.toDrive`. |
 | Max pixels | `1e9` | Earth Engine export `maxPixels`. Increase only when necessary. |
 | Encoding | `Float32 (original)` | Output numeric encoding: original float values or compact integer values. |
-| Apply QA / Cloud Mask | On | Applies MODIS product QA masks. Landsat fmask is always applied in the Landsat branch. |
+| Apply QA / Cloud Mask | On | Applies MODIS and VIIRS product QA masks. Landsat fmask, HLS Fmask, Sentinel-2 SCL, and Sentinel-3 QA are always applied in their respective pipelines. |
 | Apply Temporal Gap Fill | Off | Fills masked pixels from neighboring dates before annual statistics are computed. |
 | Apply Whittaker Smoother | Off | Penalized least-squares smoother applied to the time series before annual aggregation. |
 | Apply Moving-Window Smoother | Off | Replaces each observation with the median or mean of its temporal neighbors. |
@@ -91,7 +91,7 @@ Then click **Load Asset**. The app uses `ee.FeatureCollection(path).geometry()` 
 
 ## Available products
 
-The app currently exposes 13 product choices: 9 MODIS/MCD products, 1 harmonized Landsat product, 1 Sentinel-2 SR product, and 1 Sentinel-1 SAR product (experimental). MODIS/MCD products use the regular single-collection pipeline. Landsat, Sentinel-2, and Sentinel-1 each use dedicated pipelines.
+The app currently exposes 30 product choices organized into six mission families: 9 MODIS/MCD products, 6 Landsat products (harmonized multi-mission plus individual missions), 1 HLS S30 product, 6 VIIRS SNPP products, 1 Sentinel-2 SR product, 1 Sentinel-3 OLCI product, and 1 Sentinel-1 SAR product. The UI groups products by mission family; selecting a mission button filters the product dropdown to that family.
 
 ### MODIS and MCD products
 
@@ -127,21 +127,25 @@ The app currently exposes 13 product choices: 9 MODIS/MCD products, 1 harmonized
 
 The code also computes `CSI` and `MIRBI` inside `MOD09A1_burnIndices`, but the current UI registry exposes only `NBR` from that function. You can expose those bands by adding variable entries in the `PRODUCTS` registry.
 
-### Landsat product
+### Landsat products
+
+The app offers seven Landsat-family product options: one multi-mission harmonized product, five individual-mission products, and the HLS S30 Sentinel-2 product (cross-calibrated to Landsat 8 OLI). All Landsat-family products use Collection 2 Tier 1 Level 2 data.
+
+#### Landsat Harmonized (multi-mission)
 
 | Product in UI | Earth Engine collections | Resolution | Cadence used by app | Exposed variables |
 | --- | --- | --- | --- | --- |
 | `Landsat Harmonized (30m, LT5/7/8)` | `LANDSAT/LT05/C02/T1_L2`, `LANDSAT/LE07/C02/T1_L2`, `LANDSAT/LC08/C02/T1_L2` | 30 m | Scene based; `16-day` is used as the nominal gap-fill cadence | `NDVI`, `EVI`, `SAVI`, `NBR`, `NDWI`, `TCT_Brightness`, `TCT_Greenness`, `TCT_Wetness`, `LST` |
 
-The Landsat branch supports:
+The harmonized product merges LT5, LT7, and LT8 into a single time series with cross-sensor reflectance harmonization. It provides convenience year-range buttons: **All Landsat (1984+)**, **LT5 era (1984–2012)**, **LT7 era (1999–2023)**, and **LT8 era (2013+)**.
 
-| Mission | Sensor | Approximate period represented in UI text | Notes |
+| Mission | Sensor | Approximate period represented | Notes |
 | --- | --- | --- | --- |
-| Landsat 5 | TM | 1984-2013 | Collection 2, Tier 1, Level 2. |
-| Landsat 7 | ETM+ | 1999 onward in the catalog | Collection 2, Tier 1, Level 2. SLC-off gaps after 2003 may remain unless nearby scenes can fill them. |
-| Landsat 8 | OLI/TIRS | 2013 onward in the catalog | Collection 2, Tier 1, Level 2. |
+| Landsat 5 | TM | 1984-2012 | Collection 2, Tier 1, Level 2. |
+| Landsat 7 | ETM+ | 1999–2023 | Collection 2, Tier 1, Level 2. SLC-off gaps after 2003 may remain unless nearby scenes can fill them. |
+| Landsat 8 | OLI/TIRS | 2013 onward | Collection 2, Tier 1, Level 2. |
 
-#### Landsat processing
+#### Landsat Harmonized processing
 
 The Landsat product is not a single catalog collection. The app builds it each time a Landsat variable is requested:
 
@@ -150,10 +154,10 @@ The Landsat product is not a single catalog collection. The app builds it each t
    - Optical SR bands: `SR_B* * 0.0000275 - 0.2`
    - Surface temperature bands: `ST_B* * 0.00341802 + 149.0`
 3. Rename bands to a common schema:
-   - LT8: `SR_B2,B3,B4,B5,B6,B7` -> `Blue,Green,Red,NIR,SWIR1,SWIR2`
-   - LT5/LT7: `SR_B1,B2,B3,B4,B5,B7` -> `Blue,Green,Red,NIR,SWIR1,SWIR2`
-   - LT8 thermal: `ST_B10` -> `LST_K`
-   - LT5/LT7 thermal: `ST_B6` -> `LST_K`
+   - LT8: `SR_B2,B3,B4,B5,B6,B7` → `Blue,Green,Red,NIR,SWIR1,SWIR2`
+   - LT5/LT7: `SR_B1,B2,B3,B4,B5,B7` → `Blue,Green,Red,NIR,SWIR1,SWIR2`
+   - LT8 thermal: `ST_B10` → `LST_K`
+   - LT5/LT7 thermal: `ST_B6` → `LST_K`
 4. Apply Landsat fmask using `QA_PIXEL` cloud shadow bit 3 and cloud bit 5.
 5. Route the variable:
    - Reflectance indices (`NDVI`, `EVI`, `SAVI`, `NBR`, `NDWI`): LT5/LT7 are harmonized to OLI-like reflectance using Roy et al. (2016) coefficients before the index is calculated. LT8 is already OLI.
@@ -162,6 +166,48 @@ The Landsat product is not a single catalog collection. The app builds it each t
 6. Merge the mission collections and sort by `system:time_start`.
 
 For Landsat, the **Apply QA / Cloud Mask** checkbox does not disable fmask. Cloud and cloud-shadow masking is always applied inside the Landsat pipeline.
+
+#### Individual Landsat mission products
+
+| Product in UI | Earth Engine collection | Period | Sensor | Exposed variables |
+| --- | --- | --- | --- | --- |
+| `Landsat 4 TM (30m, 1982–1993)` | `LANDSAT/LT04/C02/T1_L2` | 1982–1993 | TM | `NDVI`, `EVI`, `SAVI`, `NBR`, `NDWI`, `TCT_Brightness`, `TCT_Greenness`, `TCT_Wetness`, `LST` |
+| `Landsat 5 TM (30m, 1984–2012)` | `LANDSAT/LT05/C02/T1_L2` | 1984–2012 | TM | `NDVI`, `EVI`, `SAVI`, `NBR`, `NDWI`, `TCT_Brightness`, `TCT_Greenness`, `TCT_Wetness`, `LST` |
+| `Landsat 7 ETM+ (30m, 1999–2024)` | `LANDSAT/LE07/C02/T1_L2` | 1999–2024 | ETM+ | `NDVI`, `EVI`, `SAVI`, `NBR`, `NDWI`, `TCT_Brightness`, `TCT_Greenness`, `TCT_Wetness`, `LST` |
+| `Landsat 8 OLI (30m, 2013+)` | `LANDSAT/LC08/C02/T1_L2` | 2013+ | OLI/TIRS | `NDVI`, `EVI`, `SAVI`, `NBR`, `NDWI`, `TCT_Brightness`, `TCT_Greenness`, `TCT_Wetness`, `LST` |
+| `Landsat 9 OLI-2 (30m, 2021+)` | `LANDSAT/LC09/C02/T1_L2` | 2021+ | OLI-2/TIRS-2 | `NDVI`, `EVI`, `SAVI`, `NBR`, `NDWI`, `TCT_Brightness`, `TCT_Greenness`, `TCT_Wetness`, `LST` |
+
+Individual mission products use the `landsat_single` pipeline branch. The key differences from the harmonized product:
+
+- **Single collection only**: no merging of multiple missions; no cross-sensor reflectance harmonization (Roy et al. coefficients are not applied).
+- **Spectral indices are computed on native reflectance** for the selected mission.
+- **Mission-specific TCT coefficients** apply in the same way as the harmonized pipeline (LT4/LT5: Crist (1985); LT7: Huang et al. (2002); LT8/LT9: Baig et al. (2014)).
+- **fmask is always applied** using `QA_PIXEL` cloud shadow bit 3 and cloud bit 5.
+- **Landsat 7 note**: SLC-off scan-line gaps are present from May 2003 onward and will produce striped or reduced-coverage annual statistics from that date.
+- **Landsat 9 note**: Baig et al. (2014) OLI coefficients are applied to OLI-2, which shares nearly identical spectral characteristics.
+
+Use individual mission products when you need a single-sensor time series or when you are studying a period where only one mission was active. Use the harmonized product when maximizing temporal density across the full Landsat record is the goal.
+
+#### HLS S30 Sentinel-2 product
+
+| Product in UI | Earth Engine collection | Resolution | Cadence | Exposed variables |
+| --- | --- | --- | --- | --- |
+| `HLS S30 Sentinel-2 (30m, daily)` | `NASA/HLS/HLSS30/v002` | 30 m | Daily (near-daily from combined S2A+S2B) | `NDVI`, `EVI`, `SAVI`, `NBR`, `NDWI`, `TCT_Brightness`, `TCT_Greenness`, `TCT_Wetness` |
+
+The HLS S30 product is part of NASA's Harmonized Landsat Sentinel-2 (HLS) project. It provides surface reflectance from Sentinel-2 MSI cross-calibrated to the Landsat 8 OLI radiometric scale, enabling consistent combined analysis with Landsat. S2A data starts 2015-11-28; select 2016+ for full-year annual statistics.
+
+HLS S30 processing:
+
+1. Load `NASA/HLS/HLSS30/v002` for the AOI and date range.
+2. Apply Fmask cloud masking: bit 1 (cloud), bit 2 (adjacent to cloud/shadow), and bit 3 (cloud shadow) are masked.
+3. Scale surface reflectance bands (same formula as Landsat C02): `B* * 0.0001`.
+4. Rename bands to the common spectral schema, using **B8A (865 nm narrow NIR)** rather than B08 (842 nm broad NIR) to match Landsat Band 5:
+   - `B2 → Blue`, `B3 → Green`, `B4 → Red`, `B8A → NIR`, `B11 → SWIR1`, `B12 → SWIR2`
+5. Route the variable using the same `LT_INDEX_FNS` and `LT8_TCT_*` functions as the Landsat pipeline.
+
+`LST` is not available for HLS S30 (no thermal band in MSI).
+
+TCT uses **Baig et al. (2014) OLI coefficients** as recommended by NASA for the HLS product because the surface reflectance is cross-calibrated to the OLI radiometric scale.
 
 ### Sentinel-2 product
 
@@ -204,6 +250,52 @@ The export scale is set automatically per variable. The Scale field in the UI sh
 | `TCT_Brightness`, `TCT_Greenness`, `TCT_Wetness` | B11, B12 (SWIR) | 20 m | 20 m |
 
 For Sentinel-2, the **Apply QA / Cloud Mask** checkbox does not disable SCL masking. Cloud, cloud shadow, and cirrus masking are always applied inside the Sentinel-2 pipeline.
+
+### Sentinel-3 OLCI product
+
+| Product in UI | Earth Engine collection | Resolution | Cadence | Exposed variables |
+| --- | --- | --- | --- | --- |
+| `Sentinel-3 OLCI (300m, ~2-day)` | `COPERNICUS/S3/OLCI` | 300 m | ~1–2 days (S3A + S3B combined) | `NDVI`, `OTCI`, `NDWI` |
+
+| Mission | Sensor | Period |
+| --- | --- | --- |
+| Sentinel-3A | OLCI | 2016-10-18 to present |
+| Sentinel-3B | OLCI | 2018-04-26 to present |
+
+Sentinel-3 OLCI provides near-daily global coverage at 300 m, making it well suited for monitoring large-area vegetation dynamics at temporal resolutions comparable to MODIS but with the unique advantage of red-edge bands for chlorophyll estimation.
+
+#### Sentinel-3 data type note
+
+The GEE collection `COPERNICUS/S3/OLCI` serves **Level-1 EFR TOA radiances**, not surface reflectance. This means:
+
+- Per-band scale factors differ (each band has its own radiance-to-reflectance scale factor applied in the pipeline before index computation).
+- Results are computed from TOA radiances, so atmospheric effects are not corrected. This is the standard source used by the official ESA OTCI product.
+- No Tasseled Cap is offered: no published TCT coefficients exist for OLCI in the literature.
+
+#### Sentinel-3 processing
+
+1. Load `COPERNICUS/S3/OLCI` for the AOI and date range.
+2. Apply QA masking: removes invalid pixels (quality flag bit 25) and saturated pixels in the five bands used for index computation (Oa06, Oa08, Oa10, Oa11, Oa17).
+3. Apply per-band scale factors to convert raw DN to physical radiance values:
+   - `Oa06 (Green, 560 nm)` × 0.0123538
+   - `Oa08 (Red, 665 nm)` × 0.00876539
+   - `Oa10 (681 nm, red-edge 1)` × 0.00773378
+   - `Oa11 (709 nm, red-edge 2)` × 0.00675523
+   - `Oa17 (NIR, 865 nm)` × 0.00493004
+4. Compute the selected variable from the scaled radiances.
+5. Sort by `system:time_start`.
+
+QA masking is always applied for Sentinel-3 and cannot be disabled via the **Apply QA / Cloud Mask** checkbox.
+
+#### Sentinel-3 variables
+
+| Variable | Formula / bands used | Notes |
+| --- | --- | --- |
+| `NDVI` | `(Oa17 − Oa08) / (Oa17 + Oa08)` | NIR (865 nm) vs Red (665 nm). Comparable to MODIS/Landsat NDVI. |
+| `OTCI` | `(Oa11 − Oa10) / (Oa10 − Oa08)` | OLCI Terrestrial Chlorophyll Index (Dash & Curran 2004). Exploits the three unique red-edge bands at 665, 681, and 709 nm. Proxy for canopy chlorophyll content. Typical range 0–7 for vegetation. |
+| `NDWI` | `(Oa06 − Oa17) / (Oa06 + Oa17)` | McFeeters (1996) variant using Green (560 nm) and NIR (865 nm). Sensitive to open water and vegetation water content. |
+
+OTCI is the main value-added variable unique to OLCI; it cannot be computed from MODIS, Landsat, or Sentinel-2 because it requires the specific red-edge bands at 681 and 709 nm. For compact integer export, OTCI values can exceed the Int16 range and are exported as `Int32 × 10000`.
 
 ### Sentinel-1 SAR product
 
@@ -258,6 +350,58 @@ All variables are derived from Interferometric Wide (IW) swath mode, GRDH imager
 - Mixing ascending and descending orbit passes introduces small systematic differences in backscatter over sloped terrain due to different incidence angles. For annual aggregation over flat or gently rolling terrain this effect is minor.
 - Pre-2015 years will return partial-year data or empty collections.
 
+### VIIRS SNPP products
+
+The Visible Infrared Imaging Radiometer Suite (VIIRS) on the Suomi NPP satellite provides MODIS-continuity land products from 2012 onward. All VIIRS products are available from 2012+ and use the same MODIS-style pipeline branch in the app. No Tasseled Cap is offered for VIIRS: published TCT coefficients (Zhang et al. 2016, Zheng et al. 2017) were calibrated on the native 750 m M-band reflectance and do not directly apply to the 500 m gridded composites in these products.
+
+| Product in UI | Earth Engine collection | Resolution | Cadence | Exposed variables |
+| --- | --- | --- | --- | --- |
+| `VNP13A1 (500m, 16-day)` | `NASA/VIIRS/002/VNP13A1` | 500 m | 16-day | `NDVI`, `EVI`, `EVI2`, `SAVI`, `MSAVI`, `NDWI`, `NBR` |
+| `VNP09GA (1km, Daily)` | `NASA/VIIRS/002/VNP09GA` | 1000 m | Daily | `NDVI`, `EVI`, `EVI2`, `SAVI`, `MSAVI`, `NDWI`, `NBR`, `Albedo_SW` |
+| `VNP09H1 (500m, 8-day)` | `NASA/VIIRS/002/VNP09H1` | 500 m | 8-day | `NDVI`, `NDWI`, `SAVI`, `MSAVI` |
+| `VNP43IA4 (500m, Daily)` | `NASA/VIIRS/002/VNP43IA4` | 500 m | Daily | `NDVI`, `NDWI`, `SAVI`, `MSAVI` |
+| `VNP15A2H (500m, 8-day)` | `NASA/VIIRS/002/VNP15A2H` | 500 m | 8-day | `LAI`, `FPAR` |
+| `VNP21A1D (1km, Daily)` | `NASA/VIIRS/002/VNP21A1D` | 1000 m | Daily | `LST_Day` |
+
+#### VIIRS band topology and spectral notes
+
+VIIRS provides two types of imagery bands at different resolutions:
+
+- **M-bands (1 km native, gridded to 1 km or 500 m)**: M3=Blue (488 nm), M4=Green (555 nm), M5=Red (672 nm), M7=NIR (865 nm), M8=SWIR1 (1240 nm), M10=SWIR2 (1610 nm), M11=SWIR3 (2250 nm). The 7-band M-band topology closely mirrors MODIS bands 1–7.
+- **I-bands (500 m native)**: I1=Red (640 nm), I2=NIR (865 nm), I3=SWIR (1610 nm). Three bands only; no Blue band, no 2.1 µm SWIR3.
+
+GEE Collection V002 for all VIIRS products serves reflectance and VI bands already in decimal form (scale factor pre-applied). Do **not** apply an additional `1e-4` multiplier.
+
+#### VIIRS variable notes
+
+| Variable | Products | Notes |
+| --- | --- | --- |
+| `NDVI` | All VIIRS SR/VI products | `(NIR − Red) / (NIR + Red)`. |
+| `EVI` | `VNP13A1`, `VNP09GA` | `2.5 × (NIR − Red) / (NIR + 6×Red − 7.5×Blue + 1)`. Requires M-band Blue. Not available for I-band-only products. |
+| `EVI2` | `VNP13A1`, `VNP09GA` | `2.5 × (NIR − Red) / (NIR + 2.4×Red + 1)`. Blue-free, soil-adjusted EVI surrogate (Jiang et al. 2008). Provided alongside EVI for products with M-bands; serves as the EVI proxy for contexts where Blue is unavailable. |
+| `SAVI` | All VIIRS SR products | `1.5 × (NIR − Red) / (NIR + Red + 0.5)`. |
+| `MSAVI` | All VIIRS SR products | Modified SAVI; removes the need for an empirical soil factor L. |
+| `NDWI` | All VIIRS SR products | Gao variant: `(NIR − SWIR) / (NIR + SWIR)`. Uses M8 (1240 nm) for M-band products and I3 (1610 nm) for I-band products. |
+| `NBR` | `VNP13A1`, `VNP09GA` | `(NIR − SWIR3) / (NIR + SWIR3)`. Uses M11 (2250 nm). Not available for I-band products (no 2.1 µm band). |
+| `Albedo_SW` | `VNP09GA` | Liang (2001) narrowband-to-broadband shortwave albedo using M-band coefficients adapted for VIIRS spectral positions. Formula: `0.160×M5 + 0.291×M7 + 0.243×M3 + 0.116×M4 + 0.112×M8 + 0.081×M11 − 0.0015`. Physically grounded surface albedo proxy. |
+| `LAI` | `VNP15A2H` | Leaf Area Index. GEE V002 serves in physical units (area fraction); scale factor of 1 applied. |
+| `FPAR` | `VNP15A2H` | Fraction of Photosynthetically Active Radiation. GEE V002 serves in 0–1 units; scale factor of 1 applied. |
+| `LST_Day` | `VNP21A1D` | Daily daytime Land Surface Temperature in Kelvin. GEE V002 serves in physical units (K); scale factor of 1 applied. |
+
+#### VIIRS product details
+
+**`VNP13A1 (500m, 16-day)`** — Vegetation Indices, 500 m, 16-day composite. Equivalent to MOD13A1. Uses the full 7-band M-band reflectance including SWIR3 for NBR. QA mask uses `pixel_reliability` ≤ 1 (Excellent and Good classes only); this is slightly stricter than the MOD13Q1 policy which also keeps Acceptable (value 2).
+
+**`VNP09GA (1km, Daily)`** — Daily surface reflectance, 1 km, M-bands. Equivalent to MOD09GA. Provides the richest VIIRS variable set including `Albedo_SW`. QA mask uses `QF1` cloud detection (bits 2–3 ≤ 1, confident/probably clear) and `QF2` cloud shadow and cirrus flags. This product is computationally intensive for large AOIs due to its daily cadence.
+
+**`VNP09H1 (500m, 8-day)`** — Surface reflectance 8-day composite, 500 m, I-bands. Equivalent to MOD09A1 at 500 m but with I-band topology. Only three bands available (Red, NIR, SWIR1). No EVI, no EVI2 (no Blue), no NBR (no 2.1 µm). NDWI here uses the 1.6 µm I3 band (NDWI/NDMI short-SWIR variant). QA mask uses `SurfReflect_State_500m` with the same bit structure as MOD09A1.
+
+**`VNP43IA4 (500m, Daily)`** — Nadir BRDF-Adjusted Reflectance (NBAR), 500 m, I-bands. Daily product providing BRDF-corrected surface reflectance at a fixed nadir view angle. Reduces angular effects present in off-nadir acquisitions. Uses the same three I-bands (I1, I2, I3) as VNP09H1. QA mask requires both I1 and I2 BRDF inversion quality ≤ 1 (full inversion or magnitude inversion).
+
+**`VNP15A2H (500m, 8-day)`** — LAI/FPAR, 500 m, 8-day composite. Equivalent to MCD15A3H. QA mask mirrors the MODIS LAI/FPAR policy: `FparLai_QC` MODLAND QA ≤ 1, plus `FparExtra_QC` cloud confidence ≤ 1, no cloud shadow, no thin cirrus.
+
+**`VNP21A1D (1km, Daily)`** — Day Land Surface Temperature and Emissivity, 1 km, daily. Equivalent to MOD21A1D; uses a Temperature Emissivity Separation (TES) algorithm rather than the split-window method used by MOD11. Provides only `LST_Day` (daytime). QA mask keeps pixels where mandatory QA bits 0–1 ≤ 1 (good quality or unreliable-but-retrieved), matching the MOD11 masking policy.
+
 ## Annual aggregation functions
 
 The following statistics are exposed under **Annual Statistics**.
@@ -288,9 +432,11 @@ Implementation note: the app derives DOY with Earth Engine `img.date().getRelati
 
 ## QA And cloud masking
 
-The **Apply QA / Cloud Mask** option is enabled by default. It controls MODIS/MCD QA masks. When unchecked, the app skips the product-level and variable-level MODIS QA masks defined in the registry.
+The **Apply QA / Cloud Mask** option is enabled by default. It controls MODIS/MCD and VIIRS QA masks. When unchecked, the app skips the product-level and variable-level masks defined in the registry for those sensor families.
 
-| Product | QA behavior when MODIS QA masking is enabled |
+Landsat fmask, HLS Fmask, Sentinel-2 SCL, and Sentinel-3 QA masking are always applied inside their respective pipelines regardless of this checkbox.
+
+| Product | QA behavior when masking is enabled |
 | --- | --- |
 | `MOD09Q1` | Uses `State` bits for clear cloud state, no cloud shadow, no cirrus, and no internal cloud. |
 | `MOD09A1` | Uses `StateQA` bits for clear cloud state, no cloud shadow, no cirrus, and no internal cloud. |
@@ -300,9 +446,18 @@ The **Apply QA / Cloud Mask** option is enabled by default. It controls MODIS/MC
 | `MCD43A1` | Keeps mandatory BRDF/albedo quality for bands 1 and 2 less than or equal to `1`. |
 | `MOD16A2` | Uses `ET_QC`; keeps MODLAND QA values `0` and `1` and requires no cloud. |
 | `MCD15A3H` | Uses `FparLai_QC` plus `FparExtra_QC`; removes cloud, cloud shadow, and significant cloud/ice contamination. |
-| Landsat Harmonized | Always uses fmask from `QA_PIXEL`: cloud shadow bit 3 must be `0`, and cloud bit 5 must be `0`. The MODIS QA checkbox does not disable this. |
-| Sentinel-2 SR | Always uses SCL: cloud shadow (SCL = 3), medium cloud (SCL = 8), high cloud (SCL = 9), and thin cirrus (SCL = 10) are masked. The MODIS QA checkbox does not disable this. |
-| Sentinel-1 SAR | Not applicable. SAR is cloud-penetrating. The QA mask checkbox is automatically disabled when this product is selected. |
+| `VNP13A1` | Uses `pixel_reliability` ≤ 1 (Excellent and Good classes only). |
+| `VNP09GA` | Uses `QF1` cloud detection (≤ 1) and `QF2` cloud shadow and cirrus flags. |
+| `VNP09H1` | Uses `SurfReflect_State_500m` bits for clear cloud state, no cloud shadow, no cirrus, and no internal cloud. |
+| `VNP43IA4` | Requires BRDF inversion quality ≤ 1 for I1 (Red) and I2 (NIR) bands. |
+| `VNP15A2H` | Uses `FparLai_QC` plus `FparExtra_QC` cloud confidence, cloud shadow, and thin cirrus flags. |
+| `VNP21A1D` | Uses mandatory QA bits 0–1 ≤ 1 (good quality or unreliable-but-retrieved). |
+| `Landsat Harmonized` | Always uses fmask from `QA_PIXEL`: cloud shadow bit 3 must be `0`, and cloud bit 5 must be `0`. The QA mask checkbox does not disable this. |
+| Individual Landsat missions | Same fmask policy as Landsat Harmonized. The QA mask checkbox does not disable this. |
+| `HLS S30 Sentinel-2` | Always uses HLS Fmask: cloud bit 1, adjacent cloud/shadow bit 2, and cloud shadow bit 3 are masked. The QA mask checkbox does not disable this. |
+| `Sentinel-2 SR` | Always uses SCL: cloud shadow (SCL = 3), medium cloud (SCL = 8), high cloud (SCL = 9), and thin cirrus (SCL = 10) are masked. The QA mask checkbox does not disable this. |
+| `Sentinel-3 OLCI` | Always applies QA: invalid pixels (quality flag bit 25) and saturated pixels in the five computation bands are masked. The QA mask checkbox does not disable this. |
+| `Sentinel-1 SAR` | Not applicable. SAR is cloud-penetrating. The QA mask checkbox is automatically disabled when this product is selected. |
 
 Masking improves scientific quality but reduces the number of valid observations. This matters for `CumSum`, `GSL`, and phenology metrics because those statistics depend strongly on how many valid dates remain.
 
@@ -441,13 +596,18 @@ Base filename:
 {ProductShort}_{Variable}_{Statistic}_{Year}
 ```
 
-`ProductShort` is the first word in the product label. Examples:
+`ProductShort` is the first word in the product label (e.g., `MOD09A1`, `LandsatH`, `HLSS30`, `VNP13A1`, `Sentinel2`, `Sentinel3`). Examples:
 
 ```text
 MOD09A1_NDVI_Mean_2020
 MOD11A2_LST_Day_Max_2018
 MCD43A1_Avg_Albedo_Median_2021
-Landsat_NBR_DOY_Max_2003
+LandsatH_NBR_DOY_Max_2003
+Landsat_NDVI_Mean_2005          (individual mission products)
+HLSS30_NDVI_Mean_2022
+VNP13A1_EVI2_Mean_2020
+VNP21A1D_LST_Day_Median_2019
+Sentinel3_OTCI_Mean_2021
 ```
 
 Optional suffixes are appended in this order: gap fill, Whittaker, Moving-Window, Harmonic, compact encoding.
@@ -468,6 +628,7 @@ MOD13Q1_NDVI_Mean_2020_GFMedianW5_i16x10000
 MOD09A1_NDVI_Mean_2020_WS10_B3
 MOD09A1_NDVI_Mean_2020_HS2_B6
 Sentinel2_NDVI_Mean_2021_MWm5_B3_i16x10000
+VNP13A1_NDVI_Mean_2020_GFMedianW5_i16x10000
 ```
 
 ### Float32 encoding
@@ -483,7 +644,7 @@ Sentinel2_NDVI_Mean_2021_MWm5_B3_i16x10000
 | `DOY_Max`, `DOY_Min`, `GSL` | `Int16` | `1` | `_i16x1` | Use values directly. |
 | `Springness`, `Winterness` | `Int16` | `10000` | `_i16x10000` | Divide by `10000`. |
 | `CV`, `CumSum` | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
-| `LST`, `ET`, `LAI`, TCT variables, albedo variables | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
+| `LST`, `ET`, `LAI`, TCT variables, albedo variables, `OTCI` | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
 | Formula-derived `EVI` except `MOD13Q1` catalog EVI | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
 | SAR dB variables: `VV`, `VH`, `VV_minus_VH` | `Int16` | `100` | `_i16x100` | Divide by `100` to recover dB. |
 | SAR `IR` (can exceed 100 over bare surfaces) | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
@@ -510,15 +671,20 @@ For each selected product, year, variable, and statistic, the app follows this o
    - Any active smoother with buffer months enabled: extend by N calendar months on each side.
 3. Load the image collection filtered by the expanded date range and AOI.
 4. Apply QA/cloud masking:
-   - MODIS/MCD: only when **Apply QA / Cloud Mask** is checked.
-   - Landsat: fmask is always applied.
+   - MODIS/MCD and VIIRS: only when **Apply QA / Cloud Mask** is checked.
+   - Landsat (harmonized and individual missions): fmask is always applied.
+   - HLS S30: Fmask is always applied.
    - Sentinel-2: SCL masking is always applied.
+   - Sentinel-3 OLCI: invalid-pixel and saturation masking are always applied.
    - Sentinel-1 SAR: no masking applied (SAR is cloud-penetrating).
 5. Convert the selected variable into a single-band image collection:
    - `compute` path: map a custom function, then select the requested band.
    - direct band path: select a catalog band and multiply by its scale factor.
-   - Landsat path: use the dedicated Landsat branch.
+   - Landsat harmonized path: use the dedicated multi-mission Landsat branch.
+   - Landsat single-mission path: use the dedicated single-mission Landsat branch (no cross-sensor harmonization).
+   - HLS S30 path: apply Fmask, rename bands to common schema, reuse LT8 index/TCT functions.
    - Sentinel-2 path: use the dedicated S2 branch.
+   - Sentinel-3 path: apply per-band scale factors, apply QA mask, compute index.
    - Sentinel-1 path: use the dedicated SAR branch (dB-to-linear conversion as needed).
 6. Sort by `system:time_start`.
 7. Apply temporal gap filling if requested (Sentinel-1 SAR always bypasses this step).
@@ -617,7 +783,9 @@ Then expose it under the Landsat product:
 'NDMI': {band: 'NDMI'}
 ```
 
-The Landsat branch will apply scale factors, rename bands, fmask clouds and shadows, harmonize LT5/LT7 to OLI-like reflectance, and then run the index function.
+Because the HLS S30 pipeline also reuses `LT_INDEX_FNS` after renaming to the common band schema, adding a new function there automatically makes it available to HLS S30 as well.
+
+The Landsat branch will apply scale factors, rename bands, fmask clouds and shadows, harmonize LT5/LT7 to OLI-like reflectance (harmonized product only), and then run the index function.
 
 ### Add a Landsat Tasseled Cap-like variable
 
@@ -627,7 +795,7 @@ Use this route only for variables that genuinely need mission-specific coefficie
 
 ## Adding a new product
 
-For a MODIS-like single-collection product, add a new entry to `PRODUCTS`:
+For a MODIS-like or VIIRS-like single-collection product, add a new entry to `PRODUCTS`:
 
 ```javascript
 'Product Label (resolution, cadence)': {
@@ -677,9 +845,14 @@ case 'P50':
 
 ## Practical guidance
 
-- Prefer MODIS/MCD products for long, regular, coarse-resolution time series.
+- Prefer MODIS/MCD products for long, regular, coarse-resolution time series going back to 2000.
+- Prefer VIIRS products as the MODIS continuity record from 2012 onward, or when inter-comparing with current products that span the MODIS-to-VIIRS transition.
 - Prefer Landsat when 30 m spatial detail is more important than temporal regularity.
-- Keep the QA mask enabled for production MODIS runs.
+- Use HLS S30 when you want the spatial resolution of Landsat but prefer a near-daily Sentinel-2 time series cross-calibrated to the Landsat 8 radiometric scale.
+- Use individual Landsat mission products (LT4 through LT9) when you need a single-sensor analysis free of cross-mission mixing.
+- Prefer Sentinel-2 SR when spatial resolution (10–20 m) is the primary requirement and 2017+ temporal coverage is sufficient.
+- Prefer Sentinel-3 OLCI for near-daily canopy chlorophyll estimation (OTCI) over large regions where the coarser 300 m resolution is acceptable.
+- Keep the QA mask enabled for production MODIS and VIIRS runs.
 - Use gap filling cautiously for phenology metrics. It can stabilize sparse time series, but it can also smooth real short events.
 - For `DOY_Max` and `DOY_Min`, inspect whether the selected variable has a meaningful seasonal maximum/minimum.
 - For current or partial years, annual statistics reflect only the observations available in the catalog and date range.
@@ -690,15 +863,16 @@ case 'P50':
 
 | Section in `EFA_Calculator_App.js` | Purpose |
 | --- | --- |
-| Section 1 | MODIS QA masks plus DOY and circular transform helpers. |
-| Section 1B | Landsat scale factors, band renaming, fmask, harmonization, Landsat indices, Tasseled Cap, and LST helpers. |
+| Section 1 | MODIS and VIIRS QA mask functions plus DOY and circular transform helpers. |
+| Section 1B | Landsat scale factors, band renaming, fmask, harmonization (Roy et al. 2016), Landsat reflectance indices and Tasseled Cap functions, lookup tables `LT_INDEX_FNS` and `LT_TCT_FNS`, per-mission config `LANDSAT_SINGLE_CONFIG`, and HLS S30 renaming and Fmask functions. |
 | Section 1C | Sentinel-2 scale factors, band renaming, SCL masking, spectral indices, and Tasseled Cap helpers (Shi & Xu 2019). |
 | Section 1D | Sentinel-1 SAR dB-to-linear helper, index functions (`S1_VV`, `S1_VH`, `S1_CR`, `S1_IR`, `S1_DpRVI`, `S1_DpRVIc`, `S1_RFDI`), and `S1_INDEX_FNS` lookup table. |
-| Section 2 | MODIS spectral indices, Tasseled Cap, burn index helper, and MOD09Q1 NDVI. |
+| Section 1E | Sentinel-3 OLCI pipeline: per-band scale factors (`applyS3ScaleFactors`), QA masking (`maskQA_S3`), and index functions (`S3_NDVI`, `S3_OTCI`, `S3_NDWI`). |
+| Section 2 | MODIS spectral indices and Tasseled Cap functions, and VIIRS spectral index functions (`VNP13A1_SpectralIndices`, `VNP09GA_SpectralIndices`, `VNP09H1_SpectralIndices`, `VNP43IA4_SpectralIndices`). |
 | Section 3 | MCD43A1 BRDF/albedo functions. |
-| Section 4 | `PRODUCTS` registry. This controls product and variable options shown in the UI. |
+| Section 4 | `PRODUCTS` registry and `MISSION_GROUPS` and `PRODUCT_YEAR_RANGES` lookup tables. These control product and variable options shown in the UI. |
 | Section 5 | Annual statistics engine and `STAT_CATEGORIES`. |
-| Section 6 | Collection loading, temporal gap filling, export encoding, Drive export, and preview visualization settings. |
+| Section 6 | Collection loading pipeline (all sensor branches), temporal gap filling, export encoding, Drive export, and preview visualization settings. |
 | Section 7 | UI widgets and default parameter values. |
 | Section 8 | Main panel assembly. |
 | Section 9 | Event handlers, validation, export task creation loop, and AOI handling. |
@@ -711,7 +885,10 @@ case 'P50':
 - Schaaf et al. (2002) - BRDF/albedo model basis.
 - Lobser and Cohen (2007) - MODIS Tasseled Cap coefficients.
 - Roy et al. (2016) - Landsat ETM+/TM to OLI harmonization coefficients.
-- Crist (1985), Huang et al. (2002), and Baig et al. (2014) - Landsat Tasseled Cap coefficients used for LT5, LT7, and LT8 respectively.
+- Crist (1985), Huang et al. (2002), and Baig et al. (2014) - Landsat Tasseled Cap coefficients used for LT5/LT4, LT7, and LT8/LT9/HLS respectively.
 - Shi & Xu (2019) - Sentinel-2 Tasseled Cap coefficients (6-band PCP-derived, aligned to Landsat 8 OLI TCT space). IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sensing, 12(10), 4038–4048. doi:10.1109/JSTARS.2019.2938388
+- Liang (2001) - Narrowband-to-broadband conversion for shortwave albedo. Remote Sensing of Environment, 76(2), 213–238. doi:10.1016/S0034-4257(00)00205-4
+- Jiang et al. (2008) - Development of a two-band enhanced vegetation index (EVI2) without a blue band. Remote Sensing of Environment, 112(10), 3833–3845. doi:10.1016/j.rse.2008.06.006
+- Dash & Curran (2004) - The MERIS terrestrial chlorophyll index. International Journal of Remote Sensing, 25(23), 5403–5413. doi:10.1080/0143116042000274015
 - Mandal, D., Kumar, V., Ratha, D., Dey, S., Bhattacharya, A., Lopez-Sanchez, J.M., McNairn, H. & Rao, Y.S. (2020) - Dual polarimetric radar vegetation index for crop growth monitoring using Sentinel-1 SAR data. Remote Sensing of Environment, 247, 111954. doi:10.1016/j.rse.2020.111954
 - Mitchard, E.T.A., Saatchi, S.S., White, L.J.T., Abernethy, K.A., Jeffery, K.J., Lewis, S.L., Collins, M., Lefsky, M.A., Leal, M.E., Woodhouse, I.H. & Meir, P. (2012) - Mapping tropical forest biomass with radar and spaceborne LiDAR in Lopé National Park, Gabon: overcoming problems of high biomass and persistent cloud. Biogeosciences, 9(1), 179–191. doi:10.5194/bg-9-179-2012
