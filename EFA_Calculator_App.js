@@ -952,6 +952,7 @@ var PRODUCTS = {
   // reflectance indices; TCT uses mission-specific coefficients (no harmonization).
   'Landsat Harmonized (30m, LT5/7/8)': {
     type: 'landsat',
+    shortName: 'LandsatH',
     resolution: 30,
     temporal: '16-day',   // nominal revisit; used for gap-fill buffer calculation
     qaMask: null,         // fmask is applied inside the Landsat pipeline builder
@@ -1078,6 +1079,7 @@ var PRODUCTS = {
   // Fmask cloud + adjacent cloud/shadow + cloud shadow masking applied inside pipeline.
   'HLS S30 Sentinel-2 (30m, daily)': {
     type: 'hls_s30',
+    shortName: 'HLSS30',
     geeId: 'NASA/HLS/HLSS30/v002',
     resolution: 30,
     temporal: 'Daily',
@@ -3193,7 +3195,7 @@ calcButton.onClick(function() {
                      selectedStats.indexOf('DOY_Max') >= 0);
 
   // Short product name for export descriptions
-  var productShort = productKey.split(' ')[0];
+  var productShort = PRODUCTS[productKey].mission || PRODUCTS[productKey].shortName || productKey.split(' ')[0];
 
   var firstImage = null;
   var firstVarName = '';
