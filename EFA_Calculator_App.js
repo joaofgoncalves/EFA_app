@@ -368,23 +368,21 @@ var LANDSAT_SINGLE_CONFIG = {
 // Collection: NASA/HLS/HLSS30/v002. Surface reflectance cross-calibrated to Landsat 8 OLI.
 // B8A (865nm narrow NIR) used instead of B08 for Landsat Band-5-equivalent alignment.
 // LT_INDEX_FNS and LT8_TCT_* reused directly after renaming to common band schema.
-// QA via Fmask: bit 1 = cloud, bit 3 = cloud shadow.
+// QA via Fmask: bit 1 = cloud, bit 2 = adjacent to cloud/shadow, bit 3 = cloud shadow.
 // TCT: Baig et al. (2014) OLI coefficients — recommended by NASA HLS documentation.
-function applyHLS_S30_ScaleFactors(img) {
-  var sr = img.select('B.*').multiply(0.0001);
-  return img.addBands(sr, null, true);
-}
 function renameHLS_S30(img) {
+  // GEE band names: B2,B3,B4 (no leading zero); B8A for narrow NIR; B11,B12 for SWIR
   return img.select(
-    ['B02',  'B03',   'B04', 'B8A', 'B11',   'B12'],
+    ['B2',   'B3',    'B4',  'B8A', 'B11',   'B12'],
     ['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2']
   );
 }
 function maskFmask_HLS(img) {
   var fmask = img.select('Fmask');
   return img.updateMask(
-    fmask.bitwiseAnd(1 << 1).eq(0)    // cloud
-      .and(fmask.bitwiseAnd(1 << 3).eq(0))  // cloud shadow
+    fmask.bitwiseAnd(1 << 1).eq(0)           // cloud
+      .and(fmask.bitwiseAnd(1 << 2).eq(0))   // adjacent to cloud/shadow
+      .and(fmask.bitwiseAnd(1 << 3).eq(0))   // cloud shadow
   );
 }
 
@@ -1077,7 +1075,7 @@ var PRODUCTS = {
   // ---- HLS S30 (NASA Harmonized Landsat Sentinel-2 — Sentinel-2 MSI, 30m) ----
   // Cross-calibrated surface reflectance at Landsat 8 OLI scale.
   // No LST (no thermal band). TCT uses Baig et al. (2014) OLI coefficients via LT8_TCT_*.
-  // Fmask cloud + shadow masking applied inside pipeline. Registered under Landsat group.
+  // Fmask cloud + adjacent cloud/shadow + cloud shadow masking applied inside pipeline.
   'HLS S30 Sentinel-2 (30m, daily)': {
     type: 'hls_s30',
     geeId: 'NASA/HLS/HLSS30/v002',
@@ -1822,7 +1820,6 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
       var hlsTctFn = LT_TCT_FNS[varName].lt8;
       col = hlsRaw.map(function(img) {
         var orig = img;
-        img = applyHLS_S30_ScaleFactors(img);
         img = renameHLS_S30(img);
         return ee.Image(hlsTctFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
       });
@@ -1830,7 +1827,6 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
       var hlsIdxFn = LT_INDEX_FNS[varName];
       col = hlsRaw.map(function(img) {
         var orig = img;
-        img = applyHLS_S30_ScaleFactors(img);
         img = renameHLS_S30(img);
         return ee.Image(hlsIdxFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
       });
@@ -2869,7 +2865,7 @@ productSelect.onChange(function(productKey) {
       '  Spectral indices on native reflectance (no cross-sensor harmonization).';
   } else if (product.type === 'hls_s30') {
     infoText = '30m | ' + product.temporal + ' | ' + varNames.length +
-      ' variable(s) | Fmask cloud + cloud shadow masking always applied\n' +
+      ' variable(s) | Fmask cloud + adjacent cloud/shadow + shadow masking always applied\n' +
       '  NASA HLS S30: S2A/B 2015-11-28+  ·  surface reflectance cross-calibrated to Landsat 8 OLI\n' +
       '  NIR uses B8A (865nm narrow) for Landsat Band-5-equivalent alignment\n' +
       '  TCT: Baig et al. (2014) OLI coefficients (recommended for HLS by NASA)  ·  No LST';
