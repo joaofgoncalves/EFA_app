@@ -11,7 +11,7 @@
  *   - Phenology: DOY of peak activity with circular transforms
  *
  * Supports 9 MODIS products, 6 Landsat products (harmonized + individual
- * missions), 1 HLS S30 product, 5 VIIRS SNPP products, 1 Sentinel-2 product,
+ * missions), 1 HLS S30 product, 6 VIIRS SNPP products, 1 Sentinel-2 product,
  * 1 Sentinel-3 OLCI product, 1 Sentinel-1 SAR product (experimental),
  * 30+ spectral/biophysical/SAR variables, and 17 annual statistics across
  * 4 categories.
@@ -29,6 +29,7 @@
  *   Alcaraz-Segura et al. (2006) - EFA framework
  *   Paruelo et al. (2001) - Ecosystem functional types
  *   Schaaf et al. (2002) - BRDF/Albedo model
+ *   Liang (2001) - Narrowband-to-broadband shortwave albedo (Remote Sens. Environ. 76:213-238)
  *   Lobser & Cohen (2007) - MODIS Tasseled Cap coefficients
  *   Roy et al. (2016) - Landsat ETM+/TM to OLI harmonization
  *   Crist (1985), Huang et al. (2002), Baig et al. (2014) - Landsat TCT coefficients
@@ -191,6 +192,23 @@ function maskQA_VNP15A2H(image) {
   var cirrus      = getQABits(extra, 3, 3, 'cirrus');
   return image.updateMask(
     qa.lte(1).and(cloudConf.lte(1)).and(cloudShadow.eq(0)).and(cirrus.eq(0))
+  );
+}
+
+// VNP09GA: QF1 bits 2-3 cloud detection (<=1 keeps confident/probably clear),
+// QF2 bit 3 cloud shadow, QF2 bit 6 thin cirrus reflective, QF2 bit 7 thin
+// cirrus emissive. Snow/ice (QF2 bit 5) and heavy aerosol (QF2 bit 4) left in
+// — they are physical states, not bad data.
+function maskQA_VNP09GA(image) {
+  var qf1 = image.select('QF1');
+  var qf2 = image.select('QF2');
+  var cloud       = getQABits(qf1, 2, 3, 'cloud');
+  var cloudShadow = getQABits(qf2, 3, 3, 'cloud_shadow');
+  var cirrusRefl  = getQABits(qf2, 6, 6, 'cirrus_refl');
+  var cirrusEmis  = getQABits(qf2, 7, 7, 'cirrus_emis');
+  return image.updateMask(
+    cloud.lte(1).and(cloudShadow.eq(0))
+      .and(cirrusRefl.eq(0)).and(cirrusEmis.eq(0))
   );
 }
 
@@ -908,6 +926,66 @@ function VNP09H1_SpectralIndices(img) {
     .set('system:time_start', img.get('system:time_start'));
 }
 
+// VNP09GA: Daily surface reflectance. M-bands (1km native) carry the full
+// 7-band topology (M3 Blue, M4 Green, M5 Red, M7 NIR, M8 SWIR1 ~1.24µm,
+// M10 SWIR2 ~1.61µm, M11 SWIR3 ~2.25µm) used here to compute the same
+// spectral-index set as VNP13A1. I-bands (500m) are not used — VNP09H1
+// already covers the 500m I-band path. GEE V002 serves reflectance already
+// in decimal form — no 1e-4 multiplier.
+function VNP09GA_SpectralIndices(img) {
+  var blue  = img.select('M3').toFloat();
+  var green = img.select('M4').toFloat();
+  var red   = img.select('M5').toFloat();
+  var nir   = img.select('M7').toFloat();
+  var swir1 = img.select('M8').toFloat();   // 1.24 µm → Gao NDWI, Liang b5
+  var swir3 = img.select('M11').toFloat();  // 2.25 µm → NBR, Liang b7
+
+  var ndvi = nir.subtract(red).divide(nir.add(red));
+
+  var evi = img.expression(
+    '2.5 * (NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1)', {
+      'NIR': nir, 'RED': red, 'BLUE': blue
+  });
+
+  var evi2 = img.expression(
+    '2.5 * (NIR - RED) / (NIR + 2.4 * RED + 1)', {
+      'NIR': nir, 'RED': red
+  });
+
+  var savi = img.expression(
+    '(1 + L) * (NIR - RED) / (NIR + RED + L)', {
+      'NIR': nir, 'RED': red, 'L': 0.5
+  });
+
+  var msavi = img.expression(
+    '(2 * NIR + 1 - sqrt(pow((2 * NIR + 1), 2) - 8 * (NIR - RED))) / 2', {
+      'NIR': nir, 'RED': red
+  });
+
+  var ndwi = nir.subtract(swir1).divide(nir.add(swir1));
+  var nbr  = nir.subtract(swir3).divide(nir.add(swir3));
+
+  // Shortwave broadband albedo (Liang 2001, Table 2 MODIS coefficients).
+  // MODIS b1/b2/b3/b4/b5/b7 map to VIIRS M5/M7/M3/M4/M8/M11 (near-identical
+  // spectral positions; M11 is the only ~100 nm offset, weight only 0.081).
+  // Serves as a physically grounded brightness / surface-albedo proxy (0-1).
+  var albedoSW = img.expression(
+    '0.160*RED + 0.291*NIR + 0.243*BLUE + 0.116*GREEN + 0.112*SWIR1 + 0.081*SWIR3 - 0.0015', {
+      'RED':   red,
+      'NIR':   nir,
+      'BLUE':  blue,
+      'GREEN': green,
+      'SWIR1': swir1,
+      'SWIR3': swir3
+  });
+
+  return ndvi.addBands(evi).addBands(evi2).addBands(savi)
+    .addBands(msavi).addBands(ndwi).addBands(nbr).addBands(albedoSW)
+    .rename(['ndvi', 'evi', 'evi2', 'savi', 'msavi', 'ndwi', 'nbr', 'albedo_sw'])
+    .toFloat()
+    .set('system:time_start', img.get('system:time_start'));
+}
+
 // VNP43IA4: Nadir BRDF-adjusted reflectance, I-bands at 500m. Same topology as
 // VNP09H1 (I1/I2/I3). GEE V002 serves reflectance already in decimal form.
 function VNP43IA4_SpectralIndices(img) {
@@ -1351,6 +1429,24 @@ var PRODUCTS = {
     }
   },
 
+  'VNP09GA (1km, Daily)': {
+    geeId: 'NASA/VIIRS/002/VNP09GA',
+    shortName: 'VNP09GA',
+    resolution: 1000,
+    temporal: 'Daily',
+    qaMask: maskQA_VNP09GA,
+    variables: {
+      'NDVI':  {compute: VNP09GA_SpectralIndices, band: 'ndvi'},
+      'EVI':   {compute: VNP09GA_SpectralIndices, band: 'evi'},
+      'EVI2':  {compute: VNP09GA_SpectralIndices, band: 'evi2'},
+      'SAVI':  {compute: VNP09GA_SpectralIndices, band: 'savi'},
+      'MSAVI': {compute: VNP09GA_SpectralIndices, band: 'msavi'},
+      'NDWI':      {compute: VNP09GA_SpectralIndices, band: 'ndwi'},
+      'NBR':       {compute: VNP09GA_SpectralIndices, band: 'nbr'},
+      'Albedo_SW': {compute: VNP09GA_SpectralIndices, band: 'albedo_sw'}
+    }
+  },
+
   'VNP09H1 (500m, 8-day)': {
     geeId: 'NASA/VIIRS/002/VNP09H1',
     shortName: 'VNP09H1',
@@ -1423,6 +1519,7 @@ var MISSION_GROUPS = {
   'Sentinel-3': ['Sentinel-3 OLCI (300m, ~2-day)'],
   'Sentinel-1': ['Sentinel-1 SAR (10m, ~12-day)'],
   'VIIRS':      ['VNP13A1 (500m, 16-day)',
+                 'VNP09GA (1km, Daily)',
                  'VNP09H1 (500m, 8-day)',
                  'VNP43IA4 (500m, Daily)',
                  'VNP15A2H (500m, 8-day)',
@@ -1458,6 +1555,7 @@ var PRODUCT_YEAR_RANGES = {
   'Sentinel-3 OLCI (300m, ~2-day)':   [{label: 'Sentinel-3 range (2017+)', start: 2017}],
   'Sentinel-1 SAR (10m, ~12-day)':     [{label: 'Sentinel-1 range (2015+)', start: 2015}],
   'VNP13A1 (500m, 16-day)':            [{label: 'VNP13A1 range (2012+)',  start: 2012}],
+  'VNP09GA (1km, Daily)':              [{label: 'VNP09GA range (2012+)',  start: 2012}],
   'VNP09H1 (500m, 8-day)':             [{label: 'VNP09H1 range (2012+)',  start: 2012}],
   'VNP43IA4 (500m, Daily)':            [{label: 'VNP43IA4 range (2012+)', start: 2012}],
   'VNP15A2H (500m, 8-day)':            [{label: 'VNP15A2H range (2012+)', start: 2012}],
@@ -3193,6 +3291,13 @@ productSelect.onChange(function(productKey) {
       infoText = viirsBase + '\n' +
         '  Reflectance-derived indices (NDVI, EVI, EVI2, SAVI, MSAVI, NDWI, NBR).\n' +
         '  NDWI uses SWIR1 (~1.24 µm, Gao); NBR uses SWIR3 (~2.25 µm).';
+    } else if (productKey.indexOf('VNP09GA') === 0) {
+      infoText = viirsBase + '\n' +
+        '  Daily M-band surface reflectance (M3/M4/M5/M7/M8/M10/M11) at 1 km native.\n' +
+        '  Indices: NDVI, EVI, EVI2, SAVI, MSAVI, NDWI (Gao, ~1.24 µm), NBR (~2.25 µm).\n' +
+        '  Albedo_SW: Liang (2001) 6-band broadband shortwave albedo — physical\n' +
+        '  brightness / surface-albedo proxy (TCT-brightness-like, 0-1).\n' +
+        '  TCT not included: no peer-reviewed VIIRS M-band TCT coefficients.';
     } else if (productKey.indexOf('VNP09H1') === 0) {
       infoText = viirsBase + '\n' +
         '  I-bands only (I1 Red, I2 NIR, I3 SWIR ~1.6 µm) — no EVI, no NBR.\n' +
