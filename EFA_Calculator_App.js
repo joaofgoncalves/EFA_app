@@ -1179,7 +1179,7 @@ var MISSION_GROUPS = {
   'Sentinel-3': ['Sentinel-3 OLCI (300m, ~2-day)'],
   'Sentinel-1': ['Sentinel-1 SAR (10m, ~12-day)']
 };
-var MISSION_NAMES = ['MODIS', 'Landsat', 'Sentinel-2', 'Sentinel-3', 'Sentinel-1'];
+var MISSION_NAMES = ['MODIS', 'Landsat', 'Sentinel-1', 'Sentinel-2', 'Sentinel-3'];
 
 // Per-product year-range button definitions.
 // Each entry is an array of {label, start, end?} objects; end omitted means open-ended.
@@ -2200,7 +2200,7 @@ var missionPanel = ui.Panel({
   layout: ui.Panel.Layout.flow('vertical'),
   style:  {stretch: 'horizontal', margin: '2px 0 4px 0'}
 });
-var missionSplit = Math.ceil(MISSION_NAMES.length / 2);
+var missionSplit = 2;  // Row 1: MODIS, Landsat  |  Row 2: Sentinel-1, -2, -3
 MISSION_NAMES.forEach(function(m, idx) {
   var btn = ui.Button({label: m, style: S_btnUnsel});
   missionButtons[m] = btn;
