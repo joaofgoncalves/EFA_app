@@ -364,6 +364,30 @@ var LANDSAT_SINGLE_CONFIG = {
   }
 };
 
+// ---- HLS S30 (NASA Harmonized Landsat Sentinel-2 — Sentinel-2 MSI, 30m) ----
+// Collection: NASA/HLS/HLSS30/v002. Surface reflectance cross-calibrated to Landsat 8 OLI.
+// B8A (865nm narrow NIR) used instead of B08 for Landsat Band-5-equivalent alignment.
+// LT_INDEX_FNS and LT8_TCT_* reused directly after renaming to common band schema.
+// QA via Fmask: bit 1 = cloud, bit 3 = cloud shadow.
+// TCT: Baig et al. (2014) OLI coefficients — recommended by NASA HLS documentation.
+function applyHLS_S30_ScaleFactors(img) {
+  var sr = img.select('B.*').multiply(0.0001);
+  return img.addBands(sr, null, true);
+}
+function renameHLS_S30(img) {
+  return img.select(
+    ['B02',  'B03',   'B04', 'B8A', 'B11',   'B12'],
+    ['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2']
+  );
+}
+function maskFmask_HLS(img) {
+  var fmask = img.select('Fmask');
+  return img.updateMask(
+    fmask.bitwiseAnd(1 << 1).eq(0)    // cloud
+      .and(fmask.bitwiseAnd(1 << 3).eq(0))  // cloud shadow
+  );
+}
+
 
 // ============================================================================
 // SECTION 1C: SENTINEL-2 SR PIPELINE
@@ -1050,6 +1074,28 @@ var PRODUCTS = {
     }
   },
 
+  // ---- HLS S30 (NASA Harmonized Landsat Sentinel-2 — Sentinel-2 MSI, 30m) ----
+  // Cross-calibrated surface reflectance at Landsat 8 OLI scale.
+  // No LST (no thermal band). TCT uses Baig et al. (2014) OLI coefficients via LT8_TCT_*.
+  // Fmask cloud + shadow masking applied inside pipeline. Registered under Landsat group.
+  'HLS S30 Sentinel-2 (30m, daily)': {
+    type: 'hls_s30',
+    geeId: 'NASA/HLS/HLSS30/v002',
+    resolution: 30,
+    temporal: 'Daily',
+    qaMask: null,   // Fmask masking applied inside pipeline
+    variables: {
+      'NDVI':           {band: 'NDVI'},
+      'EVI':            {band: 'EVI'},
+      'SAVI':           {band: 'SAVI'},
+      'NBR':            {band: 'NBR'},
+      'NDWI':           {band: 'NDWI'},
+      'TCT_Brightness': {band: 'TCTB'},
+      'TCT_Greenness':  {band: 'TCTG'},
+      'TCT_Wetness':    {band: 'TCTW'}
+    }
+  },
+
   // ---- Sentinel-2 SR Harmonized (S2A + S2B, Level-2A, 10/20m) ----
   // Collection loading is handled by a dedicated branch in loadAndProcessCollection.
   // SCL cloud masking is always applied; no cross-sensor harmonization needed.
@@ -1127,7 +1173,8 @@ var MISSION_GROUPS = {
                  'Landsat 5 TM (30m, 1984–2012)',
                  'Landsat 7 ETM+ (30m, 1999–2024)',
                  'Landsat 8 OLI (30m, 2013+)',
-                 'Landsat 9 OLI-2 (30m, 2021+)'],
+                 'Landsat 9 OLI-2 (30m, 2021+)',
+                 'HLS S30 Sentinel-2 (30m, daily)'],
   'Sentinel-2': ['Sentinel-2 SR (10/20m, 5-day)'],
   'Sentinel-3': ['Sentinel-3 OLCI (300m, ~2-day)'],
   'Sentinel-1': ['Sentinel-1 SAR (10m, ~12-day)']
@@ -1157,6 +1204,7 @@ var PRODUCT_YEAR_RANGES = {
   'Landsat 7 ETM+ (30m, 1999–2024)': [{label: 'LT7 range (1999–2023)', start: 1999, end: 2023}],
   'Landsat 8 OLI (30m, 2013+)':      [{label: 'LT8 range (2013+)',     start: 2013}],
   'Landsat 9 OLI-2 (30m, 2021+)':    [{label: 'LT9 range (2021+)',     start: 2021}],
+  'HLS S30 Sentinel-2 (30m, daily)': [{label: 'HLS S30 range (2016+)', start: 2016}],
   'Sentinel-2 SR (10/20m, 5-day)':     [{label: 'Sentinel-2 range (2017+)', start: 2017}],
   'Sentinel-3 OLCI (300m, ~2-day)':   [{label: 'Sentinel-3 range (2017+)', start: 2017}],
   'Sentinel-1 SAR (10m, ~12-day)':     [{label: 'Sentinel-1 range (2015+)', start: 2015}]
@@ -1740,6 +1788,53 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
       img = applyS3ScaleFactors(img);
       return ee.Image(s3IdxFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
     });
+
+    col = col.sort('system:time_start');
+    if (gapFillOptions.enabled) {
+      col = gapFillTemporalReducer(col, gapFillOptions.window, gapFillOptions.method);
+    }
+    if (smoothingOptions.enabled) {
+      col = whittakerSmoothing(col, smoothingOptions.lambda);
+    }
+    if (mwOptions.enabled) {
+      col = movingWindowSmooth(col, mwOptions.window, mwOptions.method);
+    }
+    if (harmonicOptions.enabled) {
+      col = harmonicSmoothing(col, harmonicOptions.numHarmonics);
+    }
+    return col.filterDate(startDate, endDate).sort('system:time_start');
+  }
+
+  // ---- HLS S30 branch ----
+  // Fmask cloud + shadow masking applied; scale factors applied per common SR formula.
+  // Bands renamed to Blue/Green/Red/NIR/SWIR1/SWIR2 — LT_INDEX_FNS and LT8_TCT_* reused.
+  if (product.type === 'hls_s30') {
+    var hlsFilter = ee.Filter.and(
+      ee.Filter.bounds(aoi),
+      ee.Filter.date(loadStartDate, loadEndDate)
+    );
+    var hlsRaw = ee.ImageCollection(product.geeId).filter(hlsFilter);
+    hlsRaw = hlsRaw.map(maskFmask_HLS);
+
+    var col;
+    if (varName === 'TCT_Brightness' || varName === 'TCT_Greenness' ||
+        varName === 'TCT_Wetness') {
+      var hlsTctFn = LT_TCT_FNS[varName].lt8;
+      col = hlsRaw.map(function(img) {
+        var orig = img;
+        img = applyHLS_S30_ScaleFactors(img);
+        img = renameHLS_S30(img);
+        return ee.Image(hlsTctFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
+      });
+    } else {
+      var hlsIdxFn = LT_INDEX_FNS[varName];
+      col = hlsRaw.map(function(img) {
+        var orig = img;
+        img = applyHLS_S30_ScaleFactors(img);
+        img = renameHLS_S30(img);
+        return ee.Image(hlsIdxFn(img.toFloat()).copyProperties(orig, orig.propertyNames()));
+      });
+    }
 
     col = col.sort('system:time_start');
     if (gapFillOptions.enabled) {
@@ -2772,6 +2867,12 @@ productSelect.onChange(function(productKey) {
       '  ' + ltInfoCfg.label + '\n' +
       '  ' + ltInfoCfg.tctNote + '\n' +
       '  Spectral indices on native reflectance (no cross-sensor harmonization).';
+  } else if (product.type === 'hls_s30') {
+    infoText = '30m | ' + product.temporal + ' | ' + varNames.length +
+      ' variable(s) | Fmask cloud + cloud shadow masking always applied\n' +
+      '  NASA HLS S30: S2A/B 2015-11-28+  ·  surface reflectance cross-calibrated to Landsat 8 OLI\n' +
+      '  NIR uses B8A (865nm narrow) for Landsat Band-5-equivalent alignment\n' +
+      '  TCT: Baig et al. (2014) OLI coefficients (recommended for HLS by NASA)  ·  No LST';
   } else if (product.type === 'sentinel2') {
     infoText = '10/20m | ' + product.temporal + ' | ' + varNames.length +
       ' variable(s) | SCL cloud masking always applied\n' +
