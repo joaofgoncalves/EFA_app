@@ -4,7 +4,7 @@
 
 The app is designed for two main use cases:
 
-- Run ready-made EFA calculations from supported MODIS/MCD, Landsat, VIIRS SNPP, Sentinel-1 SAR, Sentinel-2, and Sentinel-3 OLCI products.
+- Run ready-made EFA calculations from supported MODIS/MCD, Landsat, VIIRS SNPP, Sentinel-1 C-band SAR, PALSAR-2 L-band SAR, Sentinel-2, and Sentinel-3 OLCI products.
 - Extend the script with your own variables, indices, statistics, or products by editing the central registries in the app.
 
 There is no build system. Paste or open `EFA_Calculator_App.js` in the Earth Engine Code Editor, click **Run**, configure the side panel, then start the generated export tasks from the Earth Engine **Tasks** tab.
@@ -36,6 +36,10 @@ There is no build system. Paste or open `EFA_Calculator_App.js` in the Earth Eng
     - [Sentinel-1 SAR variables](#sentinel-1-sar-variables)
     - [Sentinel-1 SAR processing](#sentinel-1-sar-processing)
     - [Known limitations for Sentinel-1](#known-limitations-for-sentinel-1)
+  - [PALSAR-2 ScanSAR L2.2 product](#palsar-2-scansar-l22-product)
+    - [PALSAR-2 variables](#palsar-2-variables)
+    - [PALSAR-2 processing](#palsar-2-processing)
+    - [Known limitations for PALSAR-2](#known-limitations-for-palsar-2)
   - [VIIRS SNPP products](#viirs-snpp-products)
     - [VIIRS band topology and spectral notes](#viirs-band-topology-and-spectral-notes)
     - [VIIRS variable notes](#viirs-variable-notes)
@@ -49,6 +53,10 @@ There is no build system. Paste or open `EFA_Calculator_App.js` in the Earth Eng
   - [Moving-window smoother](#moving-window-smoother)
   - [Harmonic smoother](#harmonic-smoother)
   - [Edge buffer months](#edge-buffer-months)
+- [Specific-months filter](#specific-months-filter)
+  - [Within-year and wrap intervals](#within-year-and-wrap-intervals)
+  - [Interaction with phenology stats](#interaction-with-phenology-stats)
+  - [Interaction with gap fill and smoothing](#interaction-with-gap-fill-and-smoothing)
 - [Export options](#export-options)
   - [Export Region, CRS, Scale, And Folder](#export-region-crs-scale-and-folder)
   - [Filename pattern](#filename-pattern)
@@ -85,7 +93,7 @@ Not every statistic is equally meaningful for every variable. For example, the c
 1. Open `EFA_Calculator_App.js` in the Google Earth Engine Code Editor.
 2. Click **Run**.
 3. Define an area of interest using either **Draw on Map** or **GEE Asset**.
-4. Select a mission family (MODIS, Landsat, VIIRS, Sentinel-1, Sentinel-2, or Sentinel-3) from the mission buttons, then choose a specific product from the dropdown.
+4. Select a mission family (MODIS, Landsat, VIIRS, Sentinel-2, Sentinel-3, Sentinel-1, or PALSAR-2) from the mission buttons — the selector is split into an **Optical** row (MODIS, Landsat, VIIRS, Sentinel-2, Sentinel-3) and a **SAR** row (Sentinel-1, PALSAR-2) — then choose a specific product from the dropdown.
 5. Select one or more years.
 6. Select one or more variables.
 7. Select one or more annual statistics.
@@ -148,7 +156,7 @@ Then click **Load Asset**. The app uses `ee.FeatureCollection(path).geometry()` 
 
 ## Available products
 
-The app currently exposes 30 product choices organized into six mission families: 9 MODIS/MCD products, 6 Landsat products (harmonized multi-mission plus individual missions), 1 HLS S30 product, 6 VIIRS SNPP products, 1 Sentinel-2 SR product, 1 Sentinel-3 OLCI product, and 1 Sentinel-1 SAR product. The UI groups products by mission family; selecting a mission button filters the product dropdown to that family.
+The app currently exposes 31 product choices organized into seven mission families: 9 MODIS/MCD products, 6 Landsat products (harmonized multi-mission plus individual missions), 1 HLS S30 product, 6 VIIRS SNPP products, 1 Sentinel-2 SR product, 1 Sentinel-3 OLCI product, 1 Sentinel-1 C-band SAR product, and 1 PALSAR-2 L-band SAR product. The UI groups products by mission family and splits the mission buttons into two rows — **Optical** (MODIS, Landsat, VIIRS, Sentinel-2, Sentinel-3) and **SAR** (Sentinel-1, PALSAR-2). Selecting a mission button filters the product dropdown to that family.
 
 ### MODIS and MCD products
 
@@ -407,6 +415,67 @@ All variables are derived from Interferometric Wide (IW) swath mode, GRDH imager
 - Mixing ascending and descending orbit passes introduces small systematic differences in backscatter over sloped terrain due to different incidence angles. For annual aggregation over flat or gently rolling terrain this effect is minor.
 - Pre-2015 years will return partial-year data or empty collections.
 
+### PALSAR-2 ScanSAR L2.2 product
+
+> **Experimental.** JAXA's ALOS-2 PALSAR-2 is an **L-band** dual-pol SAR (HH+HV). Compared to Sentinel-1 C-band, L-band penetrates deeper into vegetation canopies and responds more strongly to woody biomass, making it especially useful for forest structure, biomass gradients (up to saturation around 100–150 Mg/ha), degradation/recovery trajectories, and savanna woody-cover change. The L2.2 product is provided as a terrain-flattened, orthorectified γ⁰ NRB/CEOS-ARD composite.
+
+| Product in UI | Earth Engine collection | Resolution | Cadence | Exposed variables |
+| --- | --- | --- | --- | --- |
+| `PALSAR-2 ScanSAR L2.2 (25m, ~14-day)` | `JAXA/ALOS/PALSAR-2/Level2_2/ScanSAR` | 25 m | ~14 days (ScanSAR) | `HH`, `HV`, `HH_minus_HV`, `RFDI`, `DpRVIc`, `RVI_dp` |
+
+| Mission | Sensor | Approximate period |
+| --- | --- | --- |
+| ALOS-2 PALSAR-2 | L-band SAR (1.27 GHz) | 2014-08-04 to present |
+
+Select years 2015 or later to ensure complete calendar-year coverage. Selecting 2014 returns only the Aug–Dec portion of that year.
+
+#### PALSAR-2 variables
+
+The L2.2 product provides HH and HV as **16-bit amplitude digital numbers** (not dB, not γ⁰), plus a local incidence angle (`LIN`, deg × 0.01) and a quality bitmask (`MSK`). The app converts DN to γ⁰ via the official relation:
+
+```
+γ⁰_dB  = 20·log₁₀(DN) − 83
+γ⁰_lin = 10^(γ⁰_dB / 10)
+```
+
+All ratio / normalized-difference / vegetation indices are computed in **γ⁰ linear** (or equivalently on `DN²`, since the −83 dB offset cancels). dB subtractions such as `HH_dB − HV_dB` are valid log-ratios and stay in dB. Mixing dB with linear-space formulas is never done.
+
+An unconditional `MSK == 1` (valid-pixel) filter is applied inside every index function, masking out layover, shadow, ocean, and invalid pixels. `LIN` is not exposed as an EFA variable — it is a geometry covariate, not a physical quantity of ecological interest.
+
+| Variable | Formula | Units | Typical range | Notes |
+| --- | --- | --- | --- | --- |
+| `HH` | `20·log₁₀(DN_HH) − 83` | dB | −20 to 0 | Co-pol backscatter. Surface + double-bounce scattering + contribution from woody structure under the canopy at L-band. |
+| `HV` | `20·log₁₀(DN_HV) − 83` | dB | −25 to −5 | Cross-pol backscatter. Volume scattering from the canopy; the single most informative channel for woody cover and biomass below saturation. |
+| `HH_minus_HV` | `HH_dB − HV_dB` | dB | 2 to 15 | Polarimetric log-ratio (= 10·log₁₀(HH_lin/HV_lin)). Higher over surface-dominated scattering. |
+| `RFDI` | `(HH_lin − HV_lin) / (HH_lin + HV_lin)` | dimensionless | −0.3 to 0.5 | Radar Forest Degradation Index (Mitchard et al. 2012). Lower over intact forest, higher over degraded / open land. |
+| `DpRVIc` | `q(q+3) / (q+1)²`, `q = HV_lin/HH_lin` | 0–1 | 0–0.9 | Intensity-only dual-pol radar vegetation index variant; proxy for scattering complexity/randomness. |
+| `RVI_dp` | `4·HV_lin / (HH_lin + HV_lin)` | 0 to ~1.3 | 0–1 | Dual-pol RVI approximation. **Use with caution**: heuristic derivative of the full-pol RVI, informative but not a fundamental dual-pol index. |
+
+`HH`, `HV`, and `HH_minus_HV` are exported in dB; `RFDI`, `DpRVIc`, and `RVI_dp` are exported as dimensionless quantities computed in linear space.
+
+**Deliberately excluded** because the L2.2 product provides only HH, HV amplitude (no VV, no phase, no complex C₂ matrix): the canonical `DpRVI` (Mandal et al. 2020, which requires the complex 2×2 covariance matrix), Freeman–Durden decomposition, Cloude–Pottier entropy/alpha, coherence, full-pol RVI, and PRVI. Texture layers (GLCM) are also out of scope for this per-pixel annual-EFA app.
+
+#### PALSAR-2 processing
+
+1. Load `JAXA/ALOS/PALSAR-2/Level2_2/ScanSAR` for the AOI and date range. No additional catalog-level filters are applied.
+2. For each image, apply `MSK == 1` to retain only valid terrestrial pixels.
+3. Compute the selected variable:
+   - `HH`, `HV`, `HH_minus_HV`: compute γ⁰ in dB (`20·log₁₀(DN) − 83`); dB log-ratio for `HH_minus_HV`.
+   - `RFDI`, `DpRVIc`, `RVI_dp`: convert to γ⁰ linear first, then apply the index formula.
+4. Sort by `system:time_start`.
+5. No spatial speckle filtering is applied. Annual aggregation (`Mean`, `Median`, percentiles) handles most speckle; for single-image inspection, speckle can be significant.
+
+**No cloud masking, no temporal gap filling, and no smoothers** are applied for PALSAR-2. SAR is cloud-penetrating and operates in all weather conditions. The **Apply QA / Cloud Mask**, **Apply Temporal Gap Fill**, and smoother controls are automatically disabled in the UI when PALSAR-2 is selected.
+
+#### Known limitations for PALSAR-2
+
+- **L2.2 is intensity-only** — no VV/VH, no complex/phase information. Full-polarimetric products (DpRVI canonical, Freeman–Durden, Cloude–Pottier, coherence) are not computable from this collection.
+- **HV biomass saturation**: HV-based biomass relationships saturate globally around 100–150 Mg/ha. For dense tropical forests, treat PALSAR-2 indices as relative gradient and change detectors rather than absolute biomass estimators without external calibration.
+- **Processing version discontinuities**: JAXA updated the L2.2 processor for acquisitions from July 2024 onward (new reference DEM, improved terrain corrections, reduced inter-scan discontinuities). When searching for subtle trends or small anomalies, verify properties such as `DataAccess_SoftwareVersion`, `DataAccess_ProcessingTime`, `PassDirection`, and `BeamID` rather than assuming perfect homogeneity across the archive.
+- **ScanSAR resolution**: nominal 25 m pixel but effectively a medium-resolution product; small perturbations (< 1 ha) may be omitted at the native pixel.
+- **Temporal sampling**: ScanSAR revisit is roughly every 14 days but gaps can be longer in some regions; annual statistics are more robust than single-date inspection.
+- Pre-2015 years return partial-year data.
+
 ### VIIRS SNPP products
 
 The Visible Infrared Imaging Radiometer Suite (VIIRS) on the Suomi NPP satellite provides MODIS-continuity land products from 2012 onward. All VIIRS products are available from 2012+ and use the same MODIS-style pipeline branch in the app. No Tasseled Cap is offered for VIIRS: published TCT coefficients (Zhang et al. 2016, Zheng et al. 2017) were calibrated on the native 750 m M-band reflectance and do not directly apply to the 500 m gridded composites in these products.
@@ -515,12 +584,13 @@ Landsat fmask, HLS Fmask, Sentinel-2 SCL, and Sentinel-3 QA masking are always a
 | `Sentinel-2 SR` | Always uses SCL: cloud shadow (SCL = 3), medium cloud (SCL = 8), high cloud (SCL = 9), and thin cirrus (SCL = 10) are masked. The QA mask checkbox does not disable this. |
 | `Sentinel-3 OLCI` | Always applies QA: invalid pixels (quality flag bit 25) and saturated pixels in the five computation bands are masked. The QA mask checkbox does not disable this. |
 | `Sentinel-1 SAR` | Not applicable. SAR is cloud-penetrating. The QA mask checkbox is automatically disabled when this product is selected. |
+| `PALSAR-2 ScanSAR L2.2` | SAR is cloud-penetrating; the QA mask checkbox is automatically disabled. An unconditional `MSK == 1` valid-pixel filter (masks layover, shadow, ocean, invalid) is applied inside every index function and cannot be disabled. |
 
 Masking improves scientific quality but reduces the number of valid observations. This matters for `CumSum`, `GSL`, and phenology metrics because those statistics depend strongly on how many valid dates remain.
 
 ## Temporal gap filling
 
-Temporal gap filling is optional and disabled by default. It is applied after masking and variable calculation, but before the final annual statistic. Gap filling is **not available for Sentinel-1 SAR**; the control is disabled in the UI and the pipeline bypasses it internally.
+Temporal gap filling is optional and disabled by default. It is applied after masking and variable calculation, but before the final annual statistic. Gap filling is **not available for SAR products (Sentinel-1 and PALSAR-2)**; the control is disabled in the UI and the pipeline bypasses it internally.
 
 When enabled, the app:
 
@@ -564,7 +634,7 @@ MOD13Q1_NDVI_Mean_2020_GFMedianW5
 
 ## Time-series smoothing
 
-Three experimental smoothers can be applied to the annual time series after masking and variable calculation but before annual statistics are computed. Only one smoother can be active at a time. Smoothing is **not available for Sentinel-1 SAR**; the controls are automatically disabled when that product is selected.
+Three experimental smoothers can be applied to the annual time series after masking and variable calculation but before annual statistics are computed. Only one smoother can be active at a time. Smoothing is **not available for SAR products (Sentinel-1 and PALSAR-2)**; the controls are automatically disabled when a SAR product is selected.
 
 The processing order when multiple options are combined is: gap fill → Whittaker (or Moving-Window, or Harmonic) → filter to calendar year → annual statistics.
 
@@ -628,6 +698,58 @@ MOD09A1_NDVI_Mean_2020_HS2_B6
 MOD13Q1_NDVI_Mean_2020_GFMedianW5_WS10_B3
 ```
 
+## Specific-months filter
+
+Annual EFAs are traditionally computed over the full calendar year, but many ecological questions are better answered by a **within-year seasonal window**: dry-season greenness, wet-season productivity, the summer photosynthetic peak, the winter dormancy trough, a post-monsoon SAR composite, and so on. The **Filter by specific months** checkbox in the side panel restricts the temporal window used for the annual statistic to a contiguous range of months, optionally wrapping across the year boundary.
+
+When the checkbox is enabled, two dropdowns appear for **Start month** and **End month** (`Jan`…`Dec`), with a live preview showing the resulting interval. The final collection is trimmed to that interval before the annual statistic is computed.
+
+### Within-year and wrap intervals
+
+The filter supports three use cases:
+
+| Case | Start → End | Interval used | Notes |
+| --- | --- | --- | --- |
+| Single month | `Jul → Jul` | `Jul 1 – Aug 1` of the selected year | Any single month is a valid window. |
+| Multi-month within year | `Jun → Sep` | `Jun 1 – Oct 1` of the selected year | End month is **inclusive**. |
+| Wrap across year boundary | `Nov → Feb` | `Nov 1 {year} – Mar 1 {year+1}` | When End month is earlier than Start month, the interval wraps. The selected year refers to the **start** year of the wrap. |
+| Full year | `Jan → Dec` | Same as the filter being off | Silently treated as a no-op; no filename suffix is appended. |
+
+Selecting `Jan → Dec` with the checkbox on has no effect; disable the checkbox instead for clarity.
+
+### Interaction with phenology stats
+
+Phenology statistics (`DOY_Max`, `DOY_Min`, `Springness`, `Winterness`, `GSL`) require a complete 12-month cycle to be meaningful — `DOY_Max` within a 3-month window is degenerate, and `Springness`/`Winterness` rely on circular DOY transforms over the full year. When the filter is active, these statistics are automatically **disabled in the UI**. If any of them are somehow selected, the Calculate button returns an error and no export tasks are created.
+
+All other statistic families remain available:
+
+- Centrality: `Mean`, `Median`
+- Extremes: `Min`, `Max`, `P10`, `P90`
+- Dispersion: `StdDev`, `CV`, `IQR`
+- Integration: `CumSum`
+
+These are all well-defined on a partial-year window.
+
+### Interaction with gap fill and smoothing
+
+The month filter is applied **after** gap fill and smoothing and **after** the smoother edge buffer is stripped. Concretely, the loading window is still expanded by any gap-fill window, moving-window window, or smoother buffer months around the **full calendar year** (not around the month interval). This preserves bilateral temporal context for the smoother across the whole seasonal cycle, and avoids edge artefacts when the month interval boundaries are chosen in the middle of a seasonal transition. Only after all smoothing runs is the collection trimmed to the requested month interval.
+
+The filter combines freely with SAR products too: Sentinel-1 and PALSAR-2 bypass gap fill and smoothers, but the month interval is still applied before annual statistics are computed.
+
+Filenames from month-filtered runs include:
+
+```text
+_MO{startMonth}_{endMonth}
+```
+
+with 1-based month numbers. For example:
+
+```text
+MOD13Q1_NDVI_Mean_2020_MO6_9              # Jun-Sep 2020
+S1_VH_Median_2020_MO11_2                  # Nov 2020 - Feb 2021 (wrap)
+PALSAR-2_HV_Mean_2020_MO7_9               # Jul-Sep 2020
+```
+
 ## Export options
 
 The app uses `Export.image.toDrive()` for every selected year-variable-statistic combination.
@@ -667,7 +789,7 @@ VNP21A1D_LST_Day_Median_2019
 Sentinel3_OTCI_Mean_2021
 ```
 
-Optional suffixes are appended in this order: gap fill, Whittaker, Moving-Window, Harmonic, compact encoding.
+Optional suffixes are appended in this order: gap fill, Whittaker, Moving-Window, Harmonic, specific-months filter, compact encoding.
 
 | Active option | Suffix pattern | Example |
 | --- | --- | --- |
@@ -676,6 +798,7 @@ Optional suffixes are appended in this order: gap fill, Whittaker, Moving-Window
 | Moving-window smoother | `_MW{m\|M}{window}` | `_MWm5` (Median), `_MWM7` (Mean) |
 | Harmonic smoother | `_HS{N}` | `_HS2` |
 | Buffer months (any smoother) | `_B{months}` appended to the smoother suffix | `_WS10_B3`, `_HS2_B6` |
+| Specific-months filter | `_MO{startMonth}_{endMonth}` (1-based) | `_MO6_9` (Jun-Sep), `_MO11_2` (Nov-Feb, wraps) |
 | Compact integer encoding | `_{i16\|i32}x{factor}` | `_i16x10000` |
 
 Full examples:
@@ -703,9 +826,10 @@ VNP13A1_NDVI_Mean_2020_GFMedianW5_i16x10000
 | `CV`, `CumSum` | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
 | `LST`, `ET`, `LAI`, TCT variables, albedo variables, `OTCI` | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
 | Formula-derived `EVI` except `MOD13Q1` catalog EVI | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
-| SAR dB variables: `VV`, `VH`, `VV_minus_VH` | `Int16` | `100` | `_i16x100` | Divide by `100` to recover dB. |
-| SAR `IR` (can exceed 100 over bare surfaces) | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
-| SAR `CR`, `DpRVI`, `DpRVIc`, `RFDI` (0–1 range) | `Int16` | `10000` | `_i16x10000` | Divide by `10000`. |
+| SAR dB variables: `VV`, `VH`, `VV_minus_VH`, `HH`, `HV`, `HH_minus_HV` | `Int16` | `100` | `_i16x100` | Divide by `100` to recover dB. |
+| Sentinel-1 `IR` (can exceed 100 over bare surfaces) | `Int32` | `10000` | `_i32x10000` | Divide by `10000`. |
+| Sentinel-1 `CR`, `DpRVI`, `DpRVIc`, `RFDI` (0–1 range) | `Int16` | `10000` | `_i16x10000` | Divide by `10000`. |
+| PALSAR-2 `RFDI`, `DpRVIc`, `RVI_dp` (bounded range) | `Int16` | `10000` | `_i16x10000` | Divide by `10000`. |
 | Other cases | `Int16` | `10000` | `_i16x10000` | Divide by `10000`. |
 
 Before integer casting, the app multiplies by the factor and clamps to the chosen integer range:
@@ -734,6 +858,7 @@ For each selected product, year, variable, and statistic, the app follows this o
    - Sentinel-2: SCL masking is always applied.
    - Sentinel-3 OLCI: invalid-pixel and saturation masking are always applied.
    - Sentinel-1 SAR: no masking applied (SAR is cloud-penetrating).
+   - PALSAR-2 ScanSAR L2.2: `MSK == 1` valid-pixel filter always applied (masks layover, shadow, ocean, invalid). The QA checkbox does not apply.
 5. Convert the selected variable into a single-band image collection:
    - `compute` path: map a custom function, then select the requested band.
    - direct band path: select a catalog band and multiply by its scale factor.
@@ -743,11 +868,12 @@ For each selected product, year, variable, and statistic, the app follows this o
    - Sentinel-2 path: use the dedicated S2 branch.
    - Sentinel-3 path: apply per-band scale factors, apply QA mask, compute index.
    - Sentinel-1 path: use the dedicated SAR branch (dB-to-linear conversion as needed).
+   - PALSAR-2 path: use the dedicated PALSAR-2 branch (`MSK == 1` filter and DN-to-γ⁰ conversion as needed).
 6. Sort by `system:time_start`.
-7. Apply temporal gap filling if requested (Sentinel-1 SAR always bypasses this step).
-8. Apply the active smoother if requested (Whittaker, Moving-Window, or Harmonic). Sentinel-1 SAR always bypasses all smoothers.
-9. Filter back to the target calendar year (strips the edge buffer and any gap-fill/smoother buffer).
-10. Compute the annual statistic.
+7. Apply temporal gap filling if requested (Sentinel-1 and PALSAR-2 always bypass this step).
+8. Apply the active smoother if requested (Whittaker, Moving-Window, or Harmonic). Sentinel-1 and PALSAR-2 always bypass all smoothers.
+9. Filter back to the target window — either the full calendar year, or the specific-months interval when the **Filter by specific months** checkbox is active (a within-year range, or a wrap interval that spans from `Start month {year}` into `End month {year+1}`). This step also strips any gap-fill / smoother edge buffer.
+10. Compute the annual statistic. Phenology statistics (`DOY_Max`, `DOY_Min`, `Springness`, `Winterness`, `GSL`) are rejected up front when the specific-months filter is active.
 11. Create a Drive export task.
 12. Add the first result to the map as a preview layer.
 
@@ -925,6 +1051,7 @@ case 'P50':
 | Section 1C | Sentinel-2 scale factors, band renaming, SCL masking, spectral indices, and Tasseled Cap helpers (Shi & Xu 2019). |
 | Section 1D | Sentinel-1 SAR dB-to-linear helper, index functions (`S1_VV`, `S1_VH`, `S1_CR`, `S1_IR`, `S1_DpRVI`, `S1_DpRVIc`, `S1_RFDI`), and `S1_INDEX_FNS` lookup table. |
 | Section 1E | Sentinel-3 OLCI pipeline: per-band scale factors (`applyS3ScaleFactors`), QA masking (`maskQA_S3`), and index functions (`S3_NDVI`, `S3_OTCI`, `S3_NDWI`). |
+| Section 1F | PALSAR-2 ScanSAR L2.2 pipeline: DN-to-γ⁰ helpers (`P2_dn2dB`, `P2_dn2lin`), `MSK == 1` valid-pixel filter (`P2_validMask`), index functions (`P2_HH`, `P2_HV`, `P2_HH_minus_HV`, `P2_RFDI`, `P2_DpRVIc`, `P2_RVI_dp`), and `P2_INDEX_FNS` lookup table. |
 | Section 2 | MODIS spectral indices and Tasseled Cap functions, and VIIRS spectral index functions (`VNP13A1_SpectralIndices`, `VNP09GA_SpectralIndices`, `VNP09H1_SpectralIndices`, `VNP43IA4_SpectralIndices`). |
 | Section 3 | MCD43A1 BRDF/albedo functions. |
 | Section 4 | `PRODUCTS` registry and `MISSION_GROUPS` and `PRODUCT_YEAR_RANGES` lookup tables. These control product and variable options shown in the UI. |
@@ -949,3 +1076,5 @@ case 'P50':
 - Dash & Curran (2004) - The MERIS terrestrial chlorophyll index. International Journal of Remote Sensing, 25(23), 5403–5413. doi:10.1080/0143116042000274015
 - Mandal, D., Kumar, V., Ratha, D., Dey, S., Bhattacharya, A., Lopez-Sanchez, J.M., McNairn, H. & Rao, Y.S. (2020) - Dual polarimetric radar vegetation index for crop growth monitoring using Sentinel-1 SAR data. Remote Sensing of Environment, 247, 111954. doi:10.1016/j.rse.2020.111954
 - Mitchard, E.T.A., Saatchi, S.S., White, L.J.T., Abernethy, K.A., Jeffery, K.J., Lewis, S.L., Collins, M., Lefsky, M.A., Leal, M.E., Woodhouse, I.H. & Meir, P. (2012) - Mapping tropical forest biomass with radar and spaceborne LiDAR in Lopé National Park, Gabon: overcoming problems of high biomass and persistent cloud. Biogeosciences, 9(1), 179–191. doi:10.5194/bg-9-179-2012
+- Kim, Y. & van Zyl, J.J. (2009) - A time-series approach to estimate soil moisture using polarimetric radar data. IEEE Transactions on Geoscience and Remote Sensing, 47(8), 2519–2527. doi:10.1109/TGRS.2009.2014944 — Dual-pol RVI approximation (`RVI_dp`) used for PALSAR-2.
+- JAXA Earth Observation Research Center — ALOS-2 PALSAR-2 Level 2.2 (NRB/CEOS-ARD) product specification, including the amplitude-DN to γ⁰ conversion `γ⁰_dB = 10·log₁₀(DN²) − 83` and the `MSK` bitmask definition. https://www.eorc.jaxa.jp/ALOS/en/alos-2/a2_l22_j.htm

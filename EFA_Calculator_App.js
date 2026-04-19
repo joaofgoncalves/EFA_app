@@ -2964,8 +2964,10 @@ var qaMaskInfo = ui.Label(
   'observations using each product\'s QA/QC band(s).\n' +
   'For Landsat Harmonized: fmask (cloud + cloud shadow) is always applied.\n' +
   'For Sentinel-2 SR: SCL cloud/shadow masking is always applied inside the pipeline.\n' +
-  'For Sentinel-1 SAR: not applicable — SAR is cloud-penetrating. ' +
-  'QA mask and gap fill are automatically disabled for SAR products.',
+  'For Sentinel-1 SAR and PALSAR-2 ScanSAR L2.2: not applicable — SAR is ' +
+  'cloud-penetrating. QA mask and gap fill are automatically disabled for ' +
+  'SAR products. PALSAR-2 L2.2 applies an unconditional MSK==1 valid-pixel ' +
+  'filter internally (masks layover, shadow, ocean, invalid).',
   {fontSize: '10px', color: '#7f8c8d', margin: '1px 0 4px 12px', whiteSpace: 'pre-wrap', shown: true}
 );
 
@@ -3505,7 +3507,7 @@ function selectMission(missionName) {
   productSelect.setDisabled(false);
   productSelect.items().reset(products);
 
-  // Auto-select if only one product (Landsat, Sentinel-1, Sentinel-2)
+  // Auto-select if only one product (Sentinel-1, Sentinel-2, Sentinel-3, PALSAR-2)
   if (products.length === 1) {
     productSelect.setValue(products[0], true);  // fires onChange
   } else {
