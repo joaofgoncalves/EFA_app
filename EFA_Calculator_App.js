@@ -1,20 +1,20 @@
 /*
  * ============================================================================
- * EFA Calculator - MODIS, Landsat, VIIRS, Sentinel-2, Sentinel-3 & Sentinel-1 SAR Annual Statistics
+ * EFA Calculator - MODIS, Landsat, VIIRS, Sentinel-2, Sentinel-3, Sentinel-1 & PALSAR-2 Annual Statistics
  * ============================================================================
  *
  * Computes Ecosystem Functional Attributes (EFAs) from MODIS, Landsat, VIIRS,
- * Sentinel-2, Sentinel-3 OLCI, and Sentinel-1 SAR time series. EFAs characterize ecosystem
- * functioning through:
+ * Sentinel-2, Sentinel-3 OLCI, Sentinel-1 C-band SAR, and PALSAR-2 L-band SAR
+ * time series. EFAs characterize ecosystem functioning through:
  *   - Magnitude: annual mean/median (productivity proxy)
  *   - Seasonality: CV, StdDev, IQR (variation intensity)
  *   - Phenology: DOY of peak activity with circular transforms
  *
  * Supports 9 MODIS products, 6 Landsat products (harmonized + individual
  * missions), 1 HLS S30 product, 6 VIIRS SNPP products, 1 Sentinel-2 product,
- * 1 Sentinel-3 OLCI product, 1 Sentinel-1 SAR product (experimental),
- * 30+ spectral/biophysical/SAR variables, and 17 annual statistics across
- * 4 categories.
+ * 1 Sentinel-3 OLCI product, 1 Sentinel-1 SAR product, 1 PALSAR-2 SAR product
+ * (both SAR products experimental), 30+ spectral/biophysical/SAR variables,
+ * and 17 annual statistics across 4 categories.
  *
  * Optional time-series smoothing before annual aggregation:
  *   - Temporal gap fill: fills masked pixels from a centered image window
@@ -667,6 +667,117 @@ var S1_INDEX_FNS = {
   'DpRVI':       S1_DpRVI,
   'DpRVIc':      S1_DpRVIc,
   'RFDI':        S1_RFDI
+};
+
+
+// ============================================================================
+// SECTION 1F: PALSAR-2 ScanSAR L2.2 SAR PIPELINE
+// ============================================================================
+// Collection: JAXA/ALOS/PALSAR-2/Level2_2/ScanSAR — L-band, HH+HV dual-pol, 25 m
+// Availability: 2014-08-04+  ·  NRB/CEOS-ARD, gamma0 terrain-flattened + orthorectified
+//
+// Bands:
+//   HH, HV  — 16-bit AMPLITUDE DN (not dB, not gamma0).
+//             gamma0_dB  = 10·log10(DN^2) - 83 = 20·log10(DN) - 83
+//             gamma0_lin = 10^(gamma0_dB / 10)  (linear power)
+//   LIN     — Local incidence angle, deg, scale 0.01 (not exposed as EFA variable)
+//   MSK     — Quality bitmask: 1=valid, 2=layover, 3=shadow, 4=ocean, 5=invalid
+//             Only MSK==1 pixels are retained (applied unconditionally for terrestrial analysis).
+//
+// All ratio / normalized-difference / vegetation indices are computed in gamma0
+// LINEAR space. dB subtractions (log-ratios) stay in dB.
+//
+// Indices implemented (report `PALSAR-2_deep-research-report.md`, Operacional tier):
+//   HH, HV, HH_minus_HV (dB log-ratio), RFDI, DpRVIc, RVI_dp (dual-pol approx)
+//
+// Canonical DpRVI (Mandal 2020), Freeman-Durden, Cloude-Pottier, entropy/alpha and
+// any full-pol or complex-matrix index are NOT implementable on L2.2 (no VV/VH,
+// no phase) and are deliberately excluded.
+//
+// Refs:
+//   Mitchard et al. (2012) Biogeosciences 9:179-191          - RFDI
+//   Dasari & Lokam (2018) / Nasirzadehdizaji et al. (2019)   - DpRVIc (intensity-only)
+//   Kim & van Zyl (2009)                                     - RVI dual-pol approximation
+// ============================================================================
+
+// Convert 16-bit amplitude DN to gamma0 in dB: 20·log10(DN) - 83
+function P2_dn2dB(dn) {
+  return dn.log10().multiply(20).subtract(83);
+}
+
+// Convert amplitude DN to gamma0 linear (power)
+function P2_dn2lin(dn) {
+  return ee.Image(10).pow(P2_dn2dB(dn).divide(10));
+}
+
+// Keep only MSK==1 (valid) pixels — masks out layover, shadow, ocean, invalid.
+function P2_validMask(img) {
+  return img.updateMask(img.select('MSK').eq(1));
+}
+
+// HH gamma0 in dB
+function P2_HH(img) {
+  var masked = P2_validMask(img);
+  return P2_dn2dB(masked.select('HH')).rename('HH')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// HV gamma0 in dB
+function P2_HV(img) {
+  var masked = P2_validMask(img);
+  return P2_dn2dB(masked.select('HV')).rename('HV')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// Polarimetric log-ratio HH_dB − HV_dB ( = 10·log10(HH_lin/HV_lin) )
+function P2_HH_minus_HV(img) {
+  var masked = P2_validMask(img);
+  var hhDb = P2_dn2dB(masked.select('HH'));
+  var hvDb = P2_dn2dB(masked.select('HV'));
+  return hhDb.subtract(hvDb).rename('HH_minus_HV')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// RFDI = (HH_lin − HV_lin) / (HH_lin + HV_lin)   (Mitchard et al. 2012)
+// The 10^(-8.3) offset cancels, so this is equivalent to (DN_HH^2 − DN_HV^2)/(DN_HH^2 + DN_HV^2).
+// Range: ~ -1..1. Higher → more surface/degraded; lower → more volume/intact forest.
+function P2_RFDI(img) {
+  var masked = P2_validMask(img);
+  var hhLin = P2_dn2lin(masked.select('HH'));
+  var hvLin = P2_dn2lin(masked.select('HV'));
+  return hhLin.subtract(hvLin).divide(hhLin.add(hvLin)).rename('RFDI')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// DpRVIc (intensity-only dual-pol variant): q(q+3) / (q+1)^2, where q = HV_lin/HH_lin.
+// Bounded 0..1 (higher → more complex/volumetric scattering).
+function P2_DpRVIc(img) {
+  var masked = P2_validMask(img);
+  var hhLin = P2_dn2lin(masked.select('HH'));
+  var hvLin = P2_dn2lin(masked.select('HV'));
+  var q = hvLin.divide(hhLin);
+  return q.multiply(q.add(3)).divide(q.add(1).pow(2)).rename('DpRVIc')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+// Dual-pol RVI approximation: 4·HV_lin / (HH_lin + HV_lin).  Use with caution —
+// it is a heuristic derivative of the full-pol RVI, informative but not a
+// fundamental dual-pol index.
+function P2_RVI_dp(img) {
+  var masked = P2_validMask(img);
+  var hhLin = P2_dn2lin(masked.select('HH'));
+  var hvLin = P2_dn2lin(masked.select('HV'));
+  return hvLin.multiply(4).divide(hhLin.add(hvLin)).rename('RVI_dp')
+    .set('system:time_start', img.get('system:time_start'));
+}
+
+var P2_INDEX_FNS = {
+  'HH':          P2_HH,
+  'HV':          P2_HV,
+  'HH_minus_HV': P2_HH_minus_HV,
+  'RFDI':        P2_RFDI,
+  'DpRVIc':      P2_DpRVIc,
+  'RVI_dp':      P2_RVI_dp
 };
 
 
@@ -1389,6 +1500,29 @@ var PRODUCTS = {
     }
   },
 
+  // ---- PALSAR-2 ScanSAR Level 2.2 (L-band, HH+HV dual-pol, 25 m) ----
+  // Dedicated pipeline branch (type: 'palsar2') in loadAndProcessCollection.
+  // MSK==1 valid-pixel masking applied unconditionally (masks layover, shadow,
+  // ocean, invalid). HH/HV amplitude DN converted to gamma0 via
+  //   gamma0_dB = 20·log10(DN) - 83
+  // Ratios (RFDI, DpRVIc, RVI_dp) computed in gamma0 linear; HH, HV, HH_minus_HV
+  // exported in dB. QA checkbox and gap fill are bypassed automatically.
+  // Archive starts 2014-08-04; select 2015+ for full-year coverage.
+  'PALSAR-2 ScanSAR L2.2 (25m, ~14-day)': {
+    type: 'palsar2',
+    resolution: 25,
+    temporal: '14-day',
+    qaMask: null,
+    variables: {
+      'HH':          {band: 'HH'},
+      'HV':          {band: 'HV'},
+      'HH_minus_HV': {band: 'HH_minus_HV'},
+      'RFDI':        {band: 'RFDI'},
+      'DpRVIc':      {band: 'DpRVIc'},
+      'RVI_dp':      {band: 'RVI_dp'}
+    }
+  },
+
   // ---- Sentinel-3 OLCI (S3A + S3B, Level-1 EFR TOA radiances, 300m) ----
   // Collection loading is handled by the sentinel3 branch in loadAndProcessCollection.
   // Per-band scale factors are applied before index computation (bands differ in scale).
@@ -1518,6 +1652,7 @@ var MISSION_GROUPS = {
   'Sentinel-2': ['Sentinel-2 SR (10/20m, 5-day)'],
   'Sentinel-3': ['Sentinel-3 OLCI (300m, ~2-day)'],
   'Sentinel-1': ['Sentinel-1 SAR (10m, ~12-day)'],
+  'PALSAR-2':   ['PALSAR-2 ScanSAR L2.2 (25m, ~14-day)'],
   'VIIRS':      ['VNP13A1 (500m, 16-day)',
                  'VNP09GA (1km, Daily)',
                  'VNP09H1 (500m, 8-day)',
@@ -1525,7 +1660,11 @@ var MISSION_GROUPS = {
                  'VNP15A2H (500m, 8-day)',
                  'VNP21A1D (1km, Daily)']
 };
-var MISSION_NAMES = ['MODIS', 'Landsat', 'VIIRS', 'Sentinel-1', 'Sentinel-2', 'Sentinel-3'];
+// Semantic ordering: optical missions first, SAR missions second.
+// The UI splits these into two labelled rows (see missionPanel construction).
+var MISSION_NAMES_OPTICAL = ['MODIS', 'Landsat', 'VIIRS', 'Sentinel-2', 'Sentinel-3'];
+var MISSION_NAMES_SAR     = ['Sentinel-1', 'PALSAR-2'];
+var MISSION_NAMES = MISSION_NAMES_OPTICAL.concat(MISSION_NAMES_SAR);
 
 // Per-product year-range button definitions.
 // Each entry is an array of {label, start, end?} objects; end omitted means open-ended.
@@ -1554,6 +1693,7 @@ var PRODUCT_YEAR_RANGES = {
   'Sentinel-2 SR (10/20m, 5-day)':     [{label: 'Sentinel-2 range (2017+)', start: 2017}],
   'Sentinel-3 OLCI (300m, ~2-day)':   [{label: 'Sentinel-3 range (2017+)', start: 2017}],
   'Sentinel-1 SAR (10m, ~12-day)':     [{label: 'Sentinel-1 range (2015+)', start: 2015}],
+  'PALSAR-2 ScanSAR L2.2 (25m, ~14-day)': [{label: 'PALSAR-2 range (2015+)', start: 2015}],
   'VNP13A1 (500m, 16-day)':            [{label: 'VNP13A1 range (2012+)',  start: 2012}],
   'VNP09GA (1km, Daily)':              [{label: 'VNP09GA range (2012+)',  start: 2012}],
   'VNP09H1 (500m, 8-day)':             [{label: 'VNP09H1 range (2012+)',  start: 2012}],
@@ -2144,6 +2284,24 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
       .sort('system:time_start');
   }
 
+  // ---- PALSAR-2 ScanSAR L2.2 branch ----
+  // MSK==1 valid-pixel masking applied inside each index function. No cloud
+  // masking (SAR is all-weather). Gap fill and smoothers are bypassed.
+  if (product.type === 'palsar2') {
+    var p2raw = ee.ImageCollection('JAXA/ALOS/PALSAR-2/Level2_2/ScanSAR')
+      .filterBounds(aoi)
+      .filterDate(loadStartDate, loadEndDate);
+
+    var p2IdxFn = P2_INDEX_FNS[varName];
+    var col = p2raw.map(function(img) {
+      return ee.Image(p2IdxFn(img).copyProperties(img, img.propertyNames()));
+    });
+
+    return col.sort('system:time_start')
+      .filterDate(targetStartDate, targetEndDate)
+      .sort('system:time_start');
+  }
+
   // ---- Sentinel-3 OLCI branch ----
   // Radiances scaled per-band (applyS3ScaleFactors); QA masking always applied.
   // Gap fill and all smoothers are supported; no SAR-style restrictions.
@@ -2306,10 +2464,12 @@ function isAlwaysInt32ExportVariable(varName) {
     varName === 'OTCI';   // red-edge ratio; typical max ~7 → ×10000 exceeds Int16
 }
 
-// SAR dB variables (VV, VH, VV_minus_VH): typical range -30 to +20 dB.
-// Factor 100 → Int16 range covers -327 to +327 dB with 0.01 dB precision.
+// SAR dB variables (S1: VV, VH, VV_minus_VH; PALSAR-2: HH, HV, HH_minus_HV).
+// Typical range -30 to +20 dB. Factor 100 → Int16 range covers ±327 dB with
+// 0.01 dB precision. Recover original dB by dividing the exported value by 100.
 function isSARdBVariable(varName) {
-  return varName === 'VV' || varName === 'VH' || varName === 'VV_minus_VH';
+  return varName === 'VV' || varName === 'VH' || varName === 'VV_minus_VH' ||
+    varName === 'HH' || varName === 'HV' || varName === 'HH_minus_HV';
 }
 
 // IR (VV_lin/VH_lin) is unbounded in forested and open land; requires Int32.
@@ -2491,6 +2651,20 @@ function getDefaultVisParams(varName, statName) {
   if (varName === 'RFDI') {
     return {min: -0.3, max: 0.5, palette: ['darkgreen', 'yellow', 'red']};
   }
+  // PALSAR-2 L-band dB backscatter
+  if (varName === 'HH') {
+    return {min: -20, max: 0, palette: ['black', 'gray', 'white']};
+  }
+  if (varName === 'HV') {
+    return {min: -25, max: -5, palette: ['black', 'gray', 'white']};
+  }
+  if (varName === 'HH_minus_HV') {
+    return {min: 2, max: 15, palette: ['blue', 'cyan', 'yellow', 'red']};
+  }
+  // PALSAR-2 dual-pol RVI approximation (0 – ~1.3)
+  if (varName === 'RVI_dp') {
+    return {min: 0, max: 1.3, palette: ['brown', 'yellow', 'green', 'darkgreen']};
+  }
   return {min: 0, max: 1};
 }
 
@@ -2571,20 +2745,30 @@ var S_btnSel   = {backgroundColor: '#1a73e8', color: '#1a73e8',   fontWeight: 'b
                   fontSize: '11px', margin: '2px', padding: '4px 8px'};
 var S_btnUnsel = {backgroundColor: '#f0f0f0', color: '#333333', fontWeight: 'normal',
                   fontSize: '11px', margin: '2px', padding: '4px 8px'};
+// Two semantic rows: Optical (MODIS, Landsat, VIIRS, Sentinel-2, Sentinel-3)
+// and SAR (Sentinel-1, PALSAR-2). Each row is prefixed by a small group label.
+var S_groupLabel = {fontSize: '10px', color: '#7f8c8d', fontWeight: 'bold',
+                    margin: '2px 4px 0 2px', padding: '0'};
+var opticalLabel = ui.Label('OPTICAL', S_groupLabel);
+var sarLabel     = ui.Label('SAR',     S_groupLabel);
 var missionRow1 = ui.Panel({layout: ui.Panel.Layout.flow('horizontal'),
-                            style: {stretch: 'horizontal', margin: '0'}});
+                            style: {stretch: 'horizontal', margin: '0 0 2px 0'}});
 var missionRow2 = ui.Panel({layout: ui.Panel.Layout.flow('horizontal'),
-                            style: {stretch: 'horizontal', margin: '0'}});
+                            style: {stretch: 'horizontal', margin: '0 0 2px 0'}});
 var missionPanel = ui.Panel({
-  widgets: [missionRow1, missionRow2],
+  widgets: [opticalLabel, missionRow1, sarLabel, missionRow2],
   layout: ui.Panel.Layout.flow('vertical'),
   style:  {stretch: 'horizontal', margin: '2px 0 4px 0'}
 });
-var missionSplit = 3;  // Row 1: MODIS, Landsat, VIIRS  |  Row 2: Sentinel-1, -2, -3
-MISSION_NAMES.forEach(function(m, idx) {
+MISSION_NAMES_OPTICAL.forEach(function(m) {
   var btn = ui.Button({label: m, style: S_btnUnsel});
   missionButtons[m] = btn;
-  (idx < missionSplit ? missionRow1 : missionRow2).add(btn);
+  missionRow1.add(btn);
+});
+MISSION_NAMES_SAR.forEach(function(m) {
+  var btn = ui.Button({label: m, style: S_btnUnsel});
+  missionButtons[m] = btn;
+  missionRow2.add(btn);
 });
 
 // Level 2.2 — product dropdown (populated when a mission is selected)
@@ -3368,7 +3552,7 @@ productSelect.onChange(function(productKey) {
     }
   }
 
-  var isSAR = (product.type === 'sentinel1');
+  var isSAR = (product.type === 'sentinel1' || product.type === 'palsar2');
 
   var infoText;
   if (product.type === 'landsat') {
@@ -3406,6 +3590,12 @@ productSelect.onChange(function(productKey) {
       '  S1A: 2014-10-03+  ·  S1B: 2016–2021  ·  S1C: 2023-present\n' +
       '  IW mode, VV+VH dual-pol  ·  Select years 2015 or later for full-year coverage\n' +
       '  dB: VV, VH, VV−VH  ·  linear ratio: CR, IR  ·  0–1: DpRVI, DpRVIc, RFDI';
+  } else if (product.type === 'palsar2') {
+    infoText = '25m | ~14-day (ScanSAR) | ' + varNames.length +
+      ' variable(s) | L-band SAR — cloud-penetrating\n' +
+      '  JAXA ALOS-2 PALSAR-2 L2.2: 2014-08-04+  ·  MSK==1 valid-pixel filter applied\n' +
+      '  Dual-pol HH+HV  ·  γ⁰_dB = 20·log10(DN) − 83  ·  ratios in γ⁰ linear\n' +
+      '  dB: HH, HV, HH−HV  ·  0–1: RFDI, DpRVIc  ·  RVI_dp: dual-pol approximation (use with caution)';
   } else if (productKey.indexOf('VNP') === 0) {
     // VIIRS SNPP products — share the MODIS collection-loading branch
     var viirsBase = product.resolution + 'm | ' + product.temporal + ' | ' +
