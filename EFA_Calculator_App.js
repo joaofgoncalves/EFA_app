@@ -37,7 +37,7 @@
  *   Mandal et al. (2020) - DpRVI for Sentinel-1 SAR (Remote Sens. Environ. 247:111954)
  *   Mitchard et al. (2012) - RFDI forest degradation index (Biogeosciences 9:179-191)
  *
- * Version: v1.0 (2026-04-17)
+ * Version: v1.2 (2026-04-17)
  * ============================================================================
  */
 
@@ -2745,30 +2745,35 @@ var S_btnSel   = {backgroundColor: '#1a73e8', color: '#1a73e8',   fontWeight: 'b
                   fontSize: '11px', margin: '2px', padding: '4px 8px'};
 var S_btnUnsel = {backgroundColor: '#f0f0f0', color: '#333333', fontWeight: 'normal',
                   fontSize: '11px', margin: '2px', padding: '4px 8px'};
-// Two semantic rows: Optical (MODIS, Landsat, VIIRS, Sentinel-2, Sentinel-3)
-// and SAR (Sentinel-1, PALSAR-2). Each row is prefixed by a small group label.
+// Two semantic groups: Optical (MODIS, Landsat, VIIRS, Sentinel-2, Sentinel-3)
+// and SAR (Sentinel-1, PALSAR-2). Optical is split across two rows to avoid
+// horizontal overflow in the side panel. Each group is prefixed by a small label.
 var S_groupLabel = {fontSize: '10px', color: '#7f8c8d', fontWeight: 'bold',
                     margin: '2px 4px 0 2px', padding: '0'};
 var opticalLabel = ui.Label('OPTICAL', S_groupLabel);
 var sarLabel     = ui.Label('SAR',     S_groupLabel);
-var missionRow1 = ui.Panel({layout: ui.Panel.Layout.flow('horizontal'),
-                            style: {stretch: 'horizontal', margin: '0 0 2px 0'}});
-var missionRow2 = ui.Panel({layout: ui.Panel.Layout.flow('horizontal'),
-                            style: {stretch: 'horizontal', margin: '0 0 2px 0'}});
+var missionRowOpt1 = ui.Panel({layout: ui.Panel.Layout.flow('horizontal'),
+                               style: {stretch: 'horizontal', margin: '0'}});
+var missionRowOpt2 = ui.Panel({layout: ui.Panel.Layout.flow('horizontal'),
+                               style: {stretch: 'horizontal', margin: '0 0 2px 0'}});
+var missionRowSar  = ui.Panel({layout: ui.Panel.Layout.flow('horizontal'),
+                               style: {stretch: 'horizontal', margin: '0 0 2px 0'}});
 var missionPanel = ui.Panel({
-  widgets: [opticalLabel, missionRow1, sarLabel, missionRow2],
+  widgets: [opticalLabel, missionRowOpt1, missionRowOpt2, sarLabel, missionRowSar],
   layout: ui.Panel.Layout.flow('vertical'),
   style:  {stretch: 'horizontal', margin: '2px 0 4px 0'}
 });
-MISSION_NAMES_OPTICAL.forEach(function(m) {
+// Optical split: row 1 = MODIS, Landsat, VIIRS  ·  row 2 = Sentinel-2, Sentinel-3
+var opticalSplit = 3;
+MISSION_NAMES_OPTICAL.forEach(function(m, idx) {
   var btn = ui.Button({label: m, style: S_btnUnsel});
   missionButtons[m] = btn;
-  missionRow1.add(btn);
+  (idx < opticalSplit ? missionRowOpt1 : missionRowOpt2).add(btn);
 });
 MISSION_NAMES_SAR.forEach(function(m) {
   var btn = ui.Button({label: m, style: S_btnUnsel});
   missionButtons[m] = btn;
-  missionRow2.add(btn);
+  missionRowSar.add(btn);
 });
 
 // Level 2.2 — product dropdown (populated when a mission is selected)
