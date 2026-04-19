@@ -1871,23 +1871,44 @@ function harmonicSmoothing(imgCol, numHarmonics) {
 
 // Load, filter, mask, and process a collection for one variable and year.
 // Handles both MODIS (single-collection) and Landsat Harmonized (multi-mission merge).
-function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions, mwOptions, harmonicOptions) {
+function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions, mwOptions, harmonicOptions, monthFilterOptions) {
   var product = PRODUCTS[productKey];
   var varConfig = product.variables[varName];
   gapFillOptions = gapFillOptions || {enabled: false};
   smoothingOptions = smoothingOptions || {enabled: false};
   mwOptions = mwOptions || {enabled: false};
   harmonicOptions = harmonicOptions || {enabled: false, numHarmonics: 2, bufferMonths: 0};
+  monthFilterOptions = monthFilterOptions || {enabled: false};
 
-  var startDate = ee.Date.fromYMD(year, 1, 1);
-  var endDate = startDate.advance(1, 'year');
-  var loadStartDate = startDate;
-  var loadEndDate = endDate;
+  // Target window: the date range the final collection will be trimmed to. With
+  // no month filter this is the full calendar year. With a within-year filter
+  // (end >= start) it is [year-sM-01, year-eM+1-01). With a wrap filter
+  // (end < start) it spans into the following year: [year-sM-01, (year+1)-eM+1-01).
+  var targetStartDate, targetEndDate;
+  if (monthFilterOptions.enabled) {
+    var sM = monthFilterOptions.startMonth;
+    var eM = monthFilterOptions.endMonth;
+    targetStartDate = ee.Date.fromYMD(year, sM, 1);
+    if (eM >= sM) {
+      targetEndDate = ee.Date.fromYMD(year, eM, 1).advance(1, 'month');
+    } else {
+      targetEndDate = ee.Date.fromYMD(year + 1, eM, 1).advance(1, 'month');
+    }
+  } else {
+    targetStartDate = ee.Date.fromYMD(year, 1, 1);
+    targetEndDate = targetStartDate.advance(1, 'year');
+  }
+  // Load window: the target window plus any smoother / gap-fill buffer. Smoothing
+  // runs over the full load window so pixels at the edges of the target window
+  // have neighbours on both sides; the trim back to targetStart/End strips the
+  // buffer (and reduces to the month interval, if active) before statistics run.
+  var loadStartDate = targetStartDate;
+  var loadEndDate = targetEndDate;
 
   if (gapFillOptions.enabled) {
     var bufferDays = getTemporalStepDays(product) * Math.floor(gapFillOptions.window / 2);
-    loadStartDate = startDate.advance(-bufferDays, 'day');
-    loadEndDate = endDate.advance(bufferDays, 'day');
+    loadStartDate = loadStartDate.advance(-bufferDays, 'day');
+    loadEndDate = loadEndDate.advance(bufferDays, 'day');
   }
   if (mwOptions.enabled) {
     var mwBufferDays = getTemporalStepDays(product) * Math.floor(mwOptions.window / 2);
@@ -1897,7 +1918,7 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
 
   // Months buffer for smoother edge correction (Whittaker or Moving-Window).
   // Loads extra data before/after the year so edge images have neighbours to smooth
-  // against; the buffer is stripped by filterDate(startDate, endDate) in each branch.
+  // against; the buffer is stripped by filterDate(targetStartDate, targetEndDate) in each branch.
   var smoothMonths = 0;
   if (smoothingOptions.enabled && smoothingOptions.bufferMonths > 0) {
     smoothMonths = smoothingOptions.bufferMonths;
@@ -1991,7 +2012,7 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     if (harmonicOptions.enabled) {
       col = harmonicSmoothing(col, harmonicOptions.numHarmonics);
     }
-    return col.filterDate(startDate, endDate).sort('system:time_start');
+    return col.filterDate(targetStartDate, targetEndDate).sort('system:time_start');
   }
 
   // ---- Landsat Single-Mission branch ----
@@ -2051,7 +2072,7 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     if (harmonicOptions.enabled) {
       col = harmonicSmoothing(col, harmonicOptions.numHarmonics);
     }
-    return col.filterDate(startDate, endDate).sort('system:time_start');
+    return col.filterDate(targetStartDate, targetEndDate).sort('system:time_start');
   }
 
   // ---- Sentinel-2 SR Harmonized branch ----
@@ -2098,7 +2119,7 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     if (harmonicOptions.enabled) {
       col = harmonicSmoothing(col, harmonicOptions.numHarmonics);
     }
-    return col.filterDate(startDate, endDate).sort('system:time_start');
+    return col.filterDate(targetStartDate, targetEndDate).sort('system:time_start');
   }
 
   // ---- Sentinel-1 SAR branch ----
@@ -2119,7 +2140,7 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
 
     // Gap fill is NOT applied for SAR regardless of gapFillOptions.enabled
     return col.sort('system:time_start')
-      .filterDate(startDate, endDate)
+      .filterDate(targetStartDate, targetEndDate)
       .sort('system:time_start');
   }
 
@@ -2154,7 +2175,7 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     if (harmonicOptions.enabled) {
       col = harmonicSmoothing(col, harmonicOptions.numHarmonics);
     }
-    return col.filterDate(startDate, endDate).sort('system:time_start');
+    return col.filterDate(targetStartDate, targetEndDate).sort('system:time_start');
   }
 
   // ---- HLS S30 branch ----
@@ -2199,7 +2220,7 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     if (harmonicOptions.enabled) {
       col = harmonicSmoothing(col, harmonicOptions.numHarmonics);
     }
-    return col.filterDate(startDate, endDate).sort('system:time_start');
+    return col.filterDate(targetStartDate, targetEndDate).sort('system:time_start');
   }
 
   // ---- MODIS branch (original pipeline) ----
@@ -2246,7 +2267,7 @@ function loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions
     col = harmonicSmoothing(col, harmonicOptions.numHarmonics);
   }
 
-  return col.filterDate(startDate, endDate)
+  return col.filterDate(targetStartDate, targetEndDate)
     .sort('system:time_start');
 }
 
@@ -2488,6 +2509,10 @@ var applyGapFill = false; // Optional temporal interpolation of masked pixels
 var applySmoothing = false; // Experimental Whittaker smoother (off by default)
 var applyMovingWindow = false; // Moving-window median/mean smoother (off by default)
 var applyHarmonic = false;    // Harmonic (Fourier) smoother (off by default)
+var applyMonthFilter = false; // Restrict stats to a contiguous month range (off by default)
+var monthFilterStart = 1;     // 1-12
+var monthFilterEnd = 12;      // 1-12; if < start, the range wraps across year boundary
+var MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 // --- Styles ---
 var S = {
@@ -2616,6 +2641,50 @@ var yearButtonsSatRanges = ui.Panel({
   layout: ui.Panel.Layout.flow('vertical'),
   style: {shown: false}
 });
+
+// ---- Specific-months filter (optional) ----
+// Restricts the temporal window used for statistics to a contiguous month interval,
+// optionally wrapping across year boundaries (e.g. Nov-Feb). When active, phenology
+// stats are disabled because DOY-based metrics require a full 12-month cycle.
+var monthFilterCheckbox = ui.Checkbox({
+  label: 'Filter by specific months',
+  value: false,
+  style: {fontSize: '12px', margin: '6px 0 0 0'}
+});
+var startMonthSelect = ui.Select({
+  items: MONTH_NAMES.slice(),
+  value: 'Jan',
+  style: {stretch: 'horizontal', fontSize: '12px'}
+});
+var endMonthSelect = ui.Select({
+  items: MONTH_NAMES.slice(),
+  value: 'Dec',
+  style: {stretch: 'horizontal', fontSize: '12px'}
+});
+var monthRangePreview = ui.Label('Jan -> Dec (full year)',
+  {fontSize: '11px', color: '#34495e', margin: '2px 0 0 0'});
+var monthFilterControls = ui.Panel({
+  widgets: [
+    makeRow('Start month:', startMonthSelect),
+    makeRow('End month:',   endMonthSelect),
+    monthRangePreview
+  ],
+  style: {shown: false, margin: '2px 0 0 12px'}
+});
+var monthFilterInfo = ui.Label(
+  'Select a contiguous month interval (single month or multi-month). ' +
+  'If End month is earlier than Start month (e.g. Nov -> Feb), the interval ' +
+  'wraps across the year boundary; the selected year then refers to the ' +
+  'START year of the wrap (e.g. 2020 = Nov 2020 to Feb 2021).\n' +
+  'Phenology stats (DOY_Max, DOY_Min, Springness, Winterness, GSL) are ' +
+  'disabled while this filter is active — only centrality, extremes, ' +
+  'dispersion, and integration stats are meaningful for partial-year windows.\n' +
+  'Smoothing and gap fill still load the full year (plus any configured ' +
+  'buffer); the month interval is applied after smoothing to minimise ' +
+  'edge artefacts at the interval boundaries.',
+  {fontSize: '10px', color: '#7f8c8d', margin: '1px 0 4px 12px',
+   whiteSpace: 'pre-wrap', shown: false}
+);
 
 // ---- 4. Variables Section ----
 var varsHeader = ui.Label('4. Variables / Dimensions', S.section);
@@ -2923,7 +2992,8 @@ var mainPanel = ui.Panel({
     aoiHeader, aoiMethodSelect, aoiDrawPanel, assetPathInput, loadAssetBtn, aoiStatus,
     ui.Panel({style: S.sep}),
     productHeader, missionSubHeader, missionPanel, productSubHeader, productSelect, productInfo,
-    yearHeader, yearPanel, yearButtonsMain, satRangesLabel, yearButtonsSatRanges, 
+    yearHeader, yearPanel, yearButtonsMain, satRangesLabel, yearButtonsSatRanges,
+    monthFilterCheckbox, monthFilterControls, monthFilterInfo,
     ui.Panel({style: S.sep}),
     varsHeader, varsPanel, varsButtons,
     statsHeader, statsPanel, statsButtons,
@@ -3070,6 +3140,61 @@ harmonicCheckbox.onChange(function(checked) {
     // Harmonic benefits from a longer edge buffer for better parameter estimation
     smoothBufferInput.setValue('6');
   }
+});
+
+// --- Specific-Months Filter Toggle ---
+function updateMonthRangePreview() {
+  var sIdx = MONTH_NAMES.indexOf(startMonthSelect.getValue() || 'Jan');
+  var eIdx = MONTH_NAMES.indexOf(endMonthSelect.getValue() || 'Dec');
+  if (sIdx < 0 || eIdx < 0) {
+    monthRangePreview.setValue('(invalid selection)');
+    return;
+  }
+  var sLbl = MONTH_NAMES[sIdx];
+  var eLbl = MONTH_NAMES[eIdx];
+  var sM = sIdx + 1;
+  var eM = eIdx + 1;
+  var label;
+  if (sM === 1 && eM === 12) {
+    label = 'Jan -> Dec (full year; same as filter off)';
+  } else if (sM === eM) {
+    label = sLbl + ' only (single month)';
+  } else if (eM >= sM) {
+    label = sLbl + ' -> ' + eLbl + ' (within year)';
+  } else {
+    label = sLbl + ' -> ' + eLbl + ' (wraps; year = start year)';
+  }
+  monthRangePreview.setValue(label);
+}
+
+function setPhenologyStatsDisabled(disabled) {
+  var phenology = STAT_CATEGORIES['Phenology'];
+  for (var i = 0; i < phenology.length; i++) {
+    var cb = statisticCheckboxes[phenology[i]];
+    if (!cb) continue;
+    cb.setDisabled(disabled);
+    if (disabled) cb.setValue(false);
+  }
+}
+
+monthFilterCheckbox.onChange(function(checked) {
+  applyMonthFilter = checked;
+  monthFilterControls.style().set('shown', checked);
+  monthFilterInfo.style().set('shown', checked);
+  setPhenologyStatsDisabled(checked);
+  updateMonthRangePreview();
+});
+
+startMonthSelect.onChange(function(v) {
+  var idx = MONTH_NAMES.indexOf(v);
+  if (idx >= 0) monthFilterStart = idx + 1;
+  updateMonthRangePreview();
+});
+
+endMonthSelect.onChange(function(v) {
+  var idx = MONTH_NAMES.indexOf(v);
+  if (idx >= 0) monthFilterEnd = idx + 1;
+  updateMonthRangePreview();
 });
 
 // --- AOI Method Toggle ---
@@ -3388,6 +3513,33 @@ function getSelectedYears() {
   return sel;
 }
 
+function getMonthFilterOptions() {
+  applyMonthFilter = monthFilterCheckbox.getValue();
+  if (!applyMonthFilter) {
+    return {enabled: false, startMonth: 1, endMonth: 12, wraps: false, suffix: ''};
+  }
+  var sIdx = MONTH_NAMES.indexOf(startMonthSelect.getValue() || 'Jan');
+  var eIdx = MONTH_NAMES.indexOf(endMonthSelect.getValue() || 'Dec');
+  if (sIdx < 0 || eIdx < 0) {
+    return {error: 'ERROR: Invalid month selection.'};
+  }
+  var sM = sIdx + 1;
+  var eM = eIdx + 1;
+  // sM === eM is a valid single-month window. Only the full-year case
+  // (Jan..Dec selected while the filter is on) is treated as a no-op.
+  var isFullYear = (sM === 1 && eM === 12);
+  if (isFullYear) {
+    return {enabled: false, startMonth: 1, endMonth: 12, wraps: false, suffix: ''};
+  }
+  return {
+    enabled: true,
+    startMonth: sM,
+    endMonth: eM,
+    wraps: (eM < sM),
+    suffix: '_MO' + sM + '_' + eM
+  };
+}
+
 function getGapFillOptions() {
   applyGapFill = gapFillCheckbox.getValue();
 
@@ -3583,6 +3735,32 @@ calcButton.onClick(function() {
     return;
   }
 
+  var monthFilterOptions = getMonthFilterOptions();
+  if (monthFilterOptions.error) {
+    statusLabel.style().set('color', 'red');
+    statusLabel.setValue(monthFilterOptions.error);
+    return;
+  }
+
+  // Defensive: phenology stats are disabled in the UI when the filter is on,
+  // but guard against any stale selections slipping through.
+  if (monthFilterOptions.enabled) {
+    var phenology = STAT_CATEGORIES['Phenology'];
+    var cleanedStats = [];
+    for (var psi = 0; psi < selectedStats.length; psi++) {
+      if (phenology.indexOf(selectedStats[psi]) < 0) {
+        cleanedStats.push(selectedStats[psi]);
+      }
+    }
+    selectedStats = cleanedStats;
+    if (selectedStats.length === 0) {
+      statusLabel.style().set('color', 'red');
+      statusLabel.setValue('ERROR: Phenology stats are disabled with the month filter active. ' +
+        'Select at least one centrality, dispersion, extremes, or integration statistic.');
+      return;
+    }
+  }
+
   // Parse export settings
   var crs = crsInput.getValue().trim() || 'EPSG:4326';
   var scale = parseInt(scaleInput.getValue(), 10) || PRODUCTS[productKey].resolution;
@@ -3610,6 +3788,12 @@ calcButton.onClick(function() {
   }
   if (harmonicOptions.enabled) {
     prepMsg += '\nHarmonic smoother: ' + harmonicOptions.numHarmonics + ' harmonic(s)';
+  }
+  if (monthFilterOptions.enabled) {
+    var sLbl = MONTH_NAMES[monthFilterOptions.startMonth - 1];
+    var eLbl = MONTH_NAMES[monthFilterOptions.endMonth - 1];
+    prepMsg += '\nMonth filter: ' + sLbl + ' -> ' + eLbl +
+      (monthFilterOptions.wraps ? ' (wraps into next year)' : '');
   }
   if (exportOptions.mode === 'compact') {
     prepMsg += '\nCompact integer export enabled. Filenames include integer type and divisor.';
@@ -3639,7 +3823,7 @@ calcButton.onClick(function() {
 
     for (var v = 0; v < selectedVars.length; v++) {
       var varName = selectedVars[v];
-      var imgCol = loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions, mwOptions, harmonicOptions);
+      var imgCol = loadAndProcessCollection(productKey, varName, year, aoi, gapFillOptions, smoothingOptions, mwOptions, harmonicOptions, monthFilterOptions);
 
       // Per-variable resolution override (e.g. Sentinel-2: 10m for NDVI/EVI/SAVI, 20m for rest)
       var varCfg = PRODUCTS[productKey].variables[varName];
@@ -3659,6 +3843,7 @@ calcButton.onClick(function() {
 
         if (result) {
           var desc = productShort + '_' + varName + '_' + statName + '_' + year +
+            monthFilterOptions.suffix +
             gapFillOptions.suffix + smoothingOptions.suffix + mwOptions.suffix + harmonicOptions.suffix;
           createExportTask(result, desc, aoi, crs, effectiveScale, folder, maxPx,
             productKey, varName, statName, exportOptions);
@@ -3692,6 +3877,7 @@ calcButton.onClick(function() {
 
   statusLabel.style().set('color', '#27ae60');
   var exportPattern = productShort + '_{Variable}_{Statistic}_{Year}' +
+    monthFilterOptions.suffix +
     gapFillOptions.suffix + smoothingOptions.suffix + mwOptions.suffix + harmonicOptions.suffix;
   if (exportOptions.mode === 'compact') {
     exportPattern += '_{i16x10000|i32x10000|i16x1}';
