@@ -37,7 +37,7 @@
  *   Mandal et al. (2020) - DpRVI for Sentinel-1 SAR (Remote Sens. Environ. 247:111954)
  *   Mitchard et al. (2012) - RFDI forest degradation index (Biogeosciences 9:179-191)
  *
- * Version: v1.2 (2026-04-17)
+ * Version: v1.2.1 (2026-06-16)
  * ============================================================================
  */
 
@@ -2560,7 +2560,7 @@ function prepareExportImage(image, exportEncoding) {
 }
 
 // Create a single export task to Google Drive
-function createExportTask(image, description, aoi, crs, scale, folder, maxPixels,
+function createExportTask(image, description, outputPrefix, aoi, crs, scale, folder, maxPixels,
                           productKey, varName, statName, exportOptions) {
   var exportEncoding = getExportEncoding(productKey, varName, statName, exportOptions);
   var exportDescription = description + exportEncoding.suffix;
@@ -2568,7 +2568,7 @@ function createExportTask(image, description, aoi, crs, scale, folder, maxPixels
     image: prepareExportImage(image, exportEncoding).clip(aoi),
     description: exportDescription,
     folder: folder,
-    fileNamePrefix: exportDescription,
+    fileNamePrefix: outputPrefix + exportDescription,
     region: aoi,
     crs: crs,
     scale: scale,
@@ -2943,6 +2943,11 @@ function makeRow(labelText, widget) {
 var crsInput    = ui.Textbox({value: 'EPSG:4326', style: {fontSize: '12px', stretch: 'horizontal'}});
 var scaleInput  = ui.Textbox({value: '500',        style: {fontSize: '12px', stretch: 'horizontal'}});
 var folderInput = ui.Textbox({value: 'GEE_EFA',    style: {fontSize: '12px', stretch: 'horizontal'}});
+var outputPrefixInput = ui.Textbox({
+  value: '',
+  placeholder: 'Optional file prefix',
+  style: {fontSize: '12px', stretch: 'horizontal'}
+});
 var maxPixInput = ui.Textbox({value: '1e9',         style: {fontSize: '12px', stretch: 'horizontal'}});
 var exportEncodingSelect = ui.Select({
   items: [EXPORT_ENCODING_FLOAT, EXPORT_ENCODING_COMPACT],
@@ -2954,6 +2959,7 @@ var exportPanel = ui.Panel([
   makeRow('CRS:', crsInput),
   makeRow('Scale (m):', scaleInput),
   makeRow('Drive folder:', folderInput),
+  makeRow('Output prefix:', outputPrefixInput),
   makeRow('Max pixels:', maxPixInput),
   makeRow('Encoding:', exportEncodingSelect)
 ]);
@@ -3962,6 +3968,7 @@ calcButton.onClick(function() {
   var crs = crsInput.getValue().trim() || 'EPSG:4326';
   var scale = parseInt(scaleInput.getValue(), 10) || PRODUCTS[productKey].resolution;
   var folder = folderInput.getValue().trim() || 'GEE_EFA';
+  var outputPrefix = outputPrefixInput.getValue().trim();
   var maxPx = parseFloat(maxPixInput.getValue()) || 1e9;
   var exportOptions = getExportOptions();
 
@@ -4042,7 +4049,7 @@ calcButton.onClick(function() {
           var desc = productShort + '_' + varName + '_' + statName + '_' + year +
             monthFilterOptions.suffix +
             gapFillOptions.suffix + smoothingOptions.suffix + mwOptions.suffix + harmonicOptions.suffix;
-          createExportTask(result, desc, aoi, crs, effectiveScale, folder, maxPx,
+          createExportTask(result, desc, outputPrefix, aoi, crs, effectiveScale, folder, maxPx,
             productKey, varName, statName, exportOptions);
           exportCount++;
 
@@ -4073,7 +4080,7 @@ calcButton.onClick(function() {
   }
 
   statusLabel.style().set('color', '#27ae60');
-  var exportPattern = productShort + '_{Variable}_{Statistic}_{Year}' +
+  var exportPattern = outputPrefix + productShort + '_{Variable}_{Statistic}_{Year}' +
     monthFilterOptions.suffix +
     gapFillOptions.suffix + smoothingOptions.suffix + mwOptions.suffix + harmonicOptions.suffix;
   if (exportOptions.mode === 'compact') {
